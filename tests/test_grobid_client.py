@@ -284,7 +284,7 @@ class TestGrobidClient:
                 result = client.process_pdf(
                     'processFulltextDocument',
                     '/test/document.pdf',
-                    generateIDs=True,
+                    generate_ids=True,
                     consolidate_header=True,
                     consolidate_citations=False,
                     include_raw_citations=False,
@@ -308,7 +308,7 @@ class TestGrobidClient:
                 result = client.process_pdf(
                     'processFulltextDocument',
                     '/nonexistent/document.pdf',
-                    generateIDs=False,
+                    generate_ids=False,
                     consolidate_header=False,
                     consolidate_citations=False,
                     include_raw_citations=False,
@@ -335,7 +335,7 @@ class TestGrobidClient:
                 result = client.process_txt(
                     'processCitationList',
                     '/test/references.txt',
-                    generateIDs=False,
+                    generate_ids=False,
                     consolidate_header=False,
                     consolidate_citations=True,
                     include_raw_citations=True,
@@ -371,7 +371,7 @@ class TestGrobidClient:
                         result = client.process_pdf(
                             'processFulltextDocument',
                             '/test/document.pdf',
-                            generateIDs=False,
+                            generate_ids=False,
                             consolidate_header=False,
                             consolidate_citations=False,
                             include_raw_citations=False,
@@ -412,7 +412,7 @@ class TestGrobidClient:
                                 '/test',
                                 '/output',
                                 n=2,
-                                generateIDs=False,
+                                generate_ids=False,
                                 consolidate_header=False,
                                 consolidate_citations=False,
                                 include_raw_citations=False,
@@ -493,7 +493,7 @@ class TestEdgeCases:
             input_path='/test',
             output='/output',
             n=1,
-            generateIDs=False,
+            generate_ids=False,
             consolidate_header=False,
             consolidate_citations=False,
             include_raw_citations=False,
@@ -535,7 +535,7 @@ class TestEdgeCases:
             result = client.process_txt(
                 'processCitationList',
                 '/test/references.txt',
-                generateIDs=False,
+                generate_ids=False,
                 consolidate_header=False,
                 consolidate_citations=False,
                 include_raw_citations=False,
@@ -585,7 +585,7 @@ class TestEdgeCases:
                 result = client.process_pdf(
                     'processFulltextDocument',
                     '/test/document.pdf',
-                    generateIDs=False,
+                    generate_ids=False,
                     consolidate_header=False,
                     consolidate_citations=False,
                     include_raw_citations=False,
@@ -600,7 +600,7 @@ class TestEdgeCases:
                     result = client.process_pdf(
                         'processFulltextDocument',
                         '/test/document.pdf',
-                        generateIDs=False,
+                        generate_ids=False,
                         consolidate_header=False,
                         consolidate_citations=False,
                         include_raw_citations=False,

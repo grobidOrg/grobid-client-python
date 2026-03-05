@@ -20,6 +20,7 @@ import argparse
 import time
 import concurrent.futures
 import ntpath
+import re
 import requests
 import pathlib
 import logging
@@ -209,7 +210,6 @@ class GrobidClient(ApiClient):
         size_str = str(size_str).upper().strip()
 
         # Extract number and unit
-        import re
         match = re.match(r'(\d+(?:\.\d+)?)\s*([KMGT]?B?)', size_str)
         if not match:
             return 10 * 1024 * 1024  # Default 10MB
@@ -329,7 +329,7 @@ class GrobidClient(ApiClient):
             input_path,
             output=None,
             n=10,
-            generateIDs=False,
+            generate_ids=False,
             consolidate_header=True,
             consolidate_citations=False,
             include_raw_citations=False,
@@ -391,7 +391,7 @@ class GrobidClient(ApiClient):
                     input_path,
                     output,
                     n,
-                    generateIDs,
+                    generate_ids,
                     consolidate_header,
                     consolidate_citations,
                     include_raw_citations,
@@ -417,7 +417,7 @@ class GrobidClient(ApiClient):
                 input_path,
                 output,
                 n,
-                generateIDs,
+                generate_ids,
                 consolidate_header,
                 consolidate_citations,
                 include_raw_citations,
@@ -455,7 +455,7 @@ class GrobidClient(ApiClient):
             input_path,
             output,
             n,
-            generateIDs,
+            generate_ids,
             consolidate_header,
             consolidate_citations,
             include_raw_citations,
@@ -542,7 +542,7 @@ class GrobidClient(ApiClient):
                     selected_process,
                     service,
                     input_file,
-                    generateIDs,
+                    generate_ids,
                     consolidate_header,
                     consolidate_citations,
                     include_raw_citations,
@@ -639,7 +639,7 @@ class GrobidClient(ApiClient):
             self,
             service,
             pdf_file,
-            generateIDs,
+            generate_ids,
             consolidate_header,
             consolidate_citations,
             include_raw_citations,
@@ -667,7 +667,7 @@ class GrobidClient(ApiClient):
 
             # set the GROBID parameters
             the_data = {}
-            if generateIDs:
+            if generate_ids:
                 the_data["generateIDs"] = "1"
             if consolidate_header:
                 the_data["consolidateHeader"] = "1"
@@ -699,7 +699,7 @@ class GrobidClient(ApiClient):
                     self.process_pdf,
                     service,
                     pdf_file,
-                    generateIDs,
+                    generate_ids,
                     consolidate_header,
                     consolidate_citations,
                     include_raw_citations,
@@ -734,7 +734,7 @@ class GrobidClient(ApiClient):
             self,
             service,
             txt_file,
-            generateIDs,
+            generate_ids,
             consolidate_header,
             consolidate_citations,
             include_raw_citations,
@@ -777,7 +777,7 @@ class GrobidClient(ApiClient):
                     self.process_txt,
                     service,
                     txt_file,
-                    generateIDs,
+                    generate_ids,
                     consolidate_header,
                     consolidate_citations,
                     include_raw_citations,
@@ -840,7 +840,8 @@ def main():
         help="concurrency for service usage"
     )
     parser.add_argument(
-        "--generateIDs",
+        "--generate_ids", "--generateIDs",
+        dest="generate_ids",
         action="store_true",
         help="generate random xml:id to textual XML elements of the result files",
     )
@@ -870,12 +871,14 @@ def main():
         help="force re-processing pdf input files when tei output files already exist",
     )
     parser.add_argument(
-        "--teiCoordinates",
+        "--tei_coordinates", "--teiCoordinates",
+        dest="tei_coordinates",
         action="store_true",
         help="add the original PDF coordinates (bounding boxes) to the extracted elements",
     )
     parser.add_argument(
-        "--segmentSentences",
+        "--segment_sentences", "--segmentSentences",
+        dest="segment_sentences",
         action="store_true",
         help="segment sentences in the text content of the document with additional <s> elements",
     )
@@ -951,14 +954,14 @@ def main():
             exit(1)
 
     service = args.service
-    generateIDs = args.generateIDs
+    generate_ids = args.generate_ids
     consolidate_header = args.consolidate_header
     consolidate_citations = args.consolidate_citations
     include_raw_citations = args.include_raw_citations
     include_raw_affiliations = args.include_raw_affiliations
     force = args.force
-    tei_coordinates = args.teiCoordinates
-    segment_sentences = args.segmentSentences
+    tei_coordinates = args.tei_coordinates
+    segment_sentences = args.segment_sentences
     verbose = args.verbose
 
     if service is None or service not in valid_services:
@@ -973,7 +976,7 @@ def main():
             input_path,
             output=output_path,
             n=n,
-            generateIDs=generateIDs,
+            generate_ids=generate_ids,
             consolidate_header=consolidate_header,
             consolidate_citations=consolidate_citations,
             include_raw_citations=include_raw_citations,
