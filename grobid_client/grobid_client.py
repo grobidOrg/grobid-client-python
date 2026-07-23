@@ -26,6 +26,10 @@ import re
 import requests
 import pathlib
 import logging
+import shutil
+import tarfile
+import tempfile
+import zipfile
 from typing import Any, Optional, Tuple, Union
 import copy
 
@@ -46,6 +50,11 @@ class GrobidClient(ApiClient):
     # likely to trigger HTTP 408 (Request Timeout) errors, so we warn the user.
     # See https://github.com/grobidOrg/grobid-client-python/issues/54
     CONSOLIDATE_CITATIONS_MIN_TIMEOUT = 120
+
+    # Archive extensions that can be streamed entry-by-entry via --input instead
+    # of being fully decompressed first. Order matters: multi-dot suffixes must
+    # come before their single-dot prefixes when stripping (see _archive_stem).
+    ARCHIVE_EXTENSIONS = (".tar.gz", ".tar.bz2", ".tgz", ".tbz2", ".zip", ".tar")
 
     # Default configuration values
     DEFAULT_CONFIG: dict = {
@@ -377,6 +386,29 @@ class GrobidClient(ApiClient):
             json_output: bool = False,
             markdown_output: bool = False
     ) -> None:
+        # If the input is a zip/tar archive, stream its entries out one chunk at
+        # a time instead of walking a directory. This never fully decompresses
+        # the archive and keeps disk usage bounded.
+        if input_path is not None and self._is_archive(input_path):
+            return self.process_archive(
+                service,
+                input_path,
+                output=output,
+                n=n,
+                generate_ids=generate_ids,
+                consolidate_header=consolidate_header,
+                consolidate_citations=consolidate_citations,
+                include_raw_citations=include_raw_citations,
+                include_raw_affiliations=include_raw_affiliations,
+                tei_coordinates=tei_coordinates,
+                segment_sentences=segment_sentences,
+                force=force,
+                verbose=verbose,
+                flavor=flavor,
+                json_output=json_output,
+                markdown_output=markdown_output,
+            )
+
         start_time = time.time()
         batch_size_pdf = self.config["batch_size"]
 
@@ -391,11 +423,7 @@ class GrobidClient(ApiClient):
         all_input_files = []
         for (dirpath, dirnames, filenames) in os.walk(input_path):
             for filename in filenames:
-                if filename.endswith(".pdf") or filename.endswith(".PDF") or \
-                        (service == 'processCitationList' and (
-                                filename.endswith(".txt") or filename.endswith(".TXT"))) or \
-                        (service == 'processCitationPatentST36' and (
-                                filename.endswith(".xml") or filename.endswith(".XML"))):
+                if self._is_eligible_input(filename, service):
                     full_path = os.sep.join([dirpath, filename])
                     all_input_files.append(full_path)
 
@@ -486,6 +514,208 @@ class GrobidClient(ApiClient):
         if skipped_files_count > 0:
             print(f"Skipped: {skipped_files_count} out of {total_files} files (already existed, use --force to reprocess)")
         
+        print(f"⏱️  Total runtime: {runtime:.2f} seconds")
+        print(f"🚀 Speed: {docs_per_second:.2f} documents/second")
+        print(f" Throughput: {seconds_per_doc:.2f} seconds/document")
+
+    def _is_eligible_input(self, filename, service):
+        """Return True if a file name is a valid input for the given service."""
+        if filename.endswith(".pdf") or filename.endswith(".PDF"):
+            return True
+        if service == 'processCitationList' and (
+                filename.endswith(".txt") or filename.endswith(".TXT")):
+            return True
+        if service == 'processCitationPatentST36' and (
+                filename.endswith(".xml") or filename.endswith(".XML")):
+            return True
+        return False
+
+    def _is_archive(self, path):
+        """Return True if path is an existing zip/tar archive file."""
+        if not os.path.isfile(path):
+            return False
+        lower = path.lower()
+        return any(lower.endswith(ext) for ext in self.ARCHIVE_EXTENSIONS)
+
+    def _archive_stem(self, path):
+        """Strip a known archive extension from path (e.g. docs.tar.gz -> docs)."""
+        lower = path.lower()
+        for ext in self.ARCHIVE_EXTENSIONS:
+            if lower.endswith(ext):
+                return path[:-len(ext)]
+        return os.path.splitext(path)[0]
+
+    def _safe_member_path(self, dest_dir, arcname):
+        """Resolve an archive entry name to a safe path under dest_dir.
+
+        Leading slashes, drive letters and '..' components are stripped to
+        prevent path-traversal ("zip slip") outside of dest_dir. Returns None
+        if the entry name has no usable path component.
+        """
+        normalized = arcname.replace("\\", "/")
+        parts = [p for p in normalized.split("/") if p not in ("", ".", "..")]
+        if not parts:
+            return None
+        return os.path.join(dest_dir, *parts)
+
+    def _open_archive(self, archive_path):
+        """Open a zip/tar archive and return (kind, handle, member_names).
+
+        member_names contains only regular files (directories are skipped).
+        """
+        if archive_path.lower().endswith(".zip"):
+            archive = zipfile.ZipFile(archive_path)
+            names = [n for n in archive.namelist() if not n.endswith("/")]
+            return "zip", archive, names
+
+        archive = tarfile.open(archive_path, "r:*")
+        names = [m.name for m in archive.getmembers() if m.isfile()]
+        return "tar", archive, names
+
+    def _extract_archive_member(self, kind, archive, member_name, dest_dir):
+        """Stream a single archive entry to dest_dir, preserving its relative path.
+
+        Returns the path of the extracted file, or None if it was skipped.
+        """
+        target = self._safe_member_path(dest_dir, member_name)
+        if target is None:
+            self.logger.warning(f"Skipping archive entry with unsafe path: {member_name}")
+            return None
+
+        parent = os.path.dirname(target)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+
+        if kind == "zip":
+            source = archive.open(member_name)
+        else:
+            source = archive.extractfile(archive.getmember(member_name))
+            if source is None:
+                return None
+
+        try:
+            with open(target, "wb") as out_file:
+                shutil.copyfileobj(source, out_file)
+        finally:
+            source.close()
+
+        return target
+
+    def process_archive(
+            self,
+            service,
+            archive_path,
+            output=None,
+            n=10,
+            generate_ids=False,
+            consolidate_header=True,
+            consolidate_citations=False,
+            include_raw_citations=False,
+            include_raw_affiliations=False,
+            tei_coordinates=False,
+            segment_sentences=False,
+            force=True,
+            verbose=False,
+            flavor=None,
+            json_output=False,
+            markdown_output=False
+    ):
+        """Process the eligible files contained in a zip/tar archive.
+
+        The archive is never fully decompressed: entries are streamed to a
+        temporary directory in chunks of ``batch_size`` (from the config), each
+        chunk is sent to GROBID via ``process_batch``, and the temporary files
+        are removed before the next chunk is extracted. This keeps disk usage
+        bounded regardless of the archive size. Output files follow the same
+        flat naming convention as directory processing (one ``<stem>`` per
+        result, in ``output``).
+        """
+        start_time = time.time()
+        batch_size_pdf = self.config["batch_size"]
+        self._warn_on_consolidation_timeout(consolidate_citations)
+
+        # Results must survive the temporary extraction directories, so when no
+        # output is given we default to a directory named after the archive.
+        if output is None:
+            output = self._archive_stem(archive_path)
+
+        try:
+            kind, archive, member_names = self._open_archive(archive_path)
+        except (zipfile.BadZipFile, tarfile.TarError, OSError) as e:
+            self.logger.error(f"Could not open archive {archive_path}: {str(e)}")
+            return
+
+        processed_files_count = 0
+        errors_files_count = 0
+        skipped_files_count = 0
+        total_files = 0
+
+        try:
+            eligible_members = [
+                name for name in member_names
+                if self._is_eligible_input(os.path.basename(name), service)
+            ]
+            total_files = len(eligible_members)
+            if total_files == 0:
+                self.logger.warning(f"No eligible files found in archive {archive_path}")
+                return
+
+            print(f"Found {total_files} file(s) to process in {archive_path}")
+
+            for chunk_start in range(0, total_files, batch_size_pdf):
+                chunk = eligible_members[chunk_start:chunk_start + batch_size_pdf]
+                temp_dir = tempfile.mkdtemp(prefix="grobid_archive_")
+                try:
+                    extracted_files = []
+                    for member_name in chunk:
+                        if verbose:
+                            self.logger.info(f"Extracting {member_name} from {archive_path}")
+                        extracted = self._extract_archive_member(kind, archive, member_name, temp_dir)
+                        if extracted is not None:
+                            extracted_files.append(extracted)
+
+                    if not extracted_files:
+                        continue
+
+                    batch_processed, batch_errors, batch_skipped = self.process_batch(
+                        service,
+                        extracted_files,
+                        temp_dir,
+                        output,
+                        n,
+                        generate_ids,
+                        consolidate_header,
+                        consolidate_citations,
+                        include_raw_citations,
+                        include_raw_affiliations,
+                        tei_coordinates,
+                        segment_sentences,
+                        force,
+                        verbose,
+                        flavor,
+                        json_output,
+                        markdown_output
+                    )
+                    processed_files_count += batch_processed
+                    errors_files_count += batch_errors
+                    skipped_files_count += batch_skipped
+                finally:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+        finally:
+            archive.close()
+
+        if total_files == 0:
+            return
+
+        runtime = time.time() - start_time
+        docs_per_second = processed_files_count / runtime if runtime > 0 else 0
+        seconds_per_doc = runtime / processed_files_count if processed_files_count > 0 else 0
+
+        print(f"Processing completed: {processed_files_count} out of {total_files} files processed")
+        print(f"Errors: {errors_files_count} out of {total_files} files processed")
+        if skipped_files_count > 0:
+            print(f"Skipped: {skipped_files_count} out of {total_files} files (already existed, use --force to reprocess)")
+
         print(f"⏱️  Total runtime: {runtime:.2f} seconds")
         print(f"🚀 Speed: {docs_per_second:.2f} documents/second")
         print(f" Throughput: {seconds_per_doc:.2f} seconds/document")
@@ -864,7 +1094,7 @@ def main() -> None:
     parser.add_argument(
         "--input",
         default=None,
-        help="path to the directory containing files to process: PDF or .txt (for processCitationList only, one reference per line), or .xml for patents in ST36"
+        help="path to the directory - or a .zip/.tar/.tar.gz archive - containing files to process: PDF or .txt (for processCitationList only, one reference per line), or .xml for patents in ST36. Archives are streamed and never fully decompressed."
     )
     parser.add_argument(
         "--output",

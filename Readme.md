@@ -34,6 +34,7 @@ concurrent processing capabilities for PDF documents, reference strings, and pat
 - **JSON Output**: Convert TEI XML output to structured JSON format with CORD-19-like structure
 - **Markdown Output**: Convert TEI XML output to clean Markdown format with structured sections
 - **Type Hints**: Ships inline type annotations and a `py.typed` marker (PEP 561) for static type checking
+- **Archive Streaming**: Process files directly from `.zip`/`.tar`/`.tar.gz` archives without fully decompressing them
 
 ## 📋 Prerequisites
 
@@ -167,7 +168,18 @@ grobid_client --server https://grobid.example.com --input ~/citations.txt proces
 
 # Force reprocessing with sentence segmentation and JSON output
 grobid_client --input ~/docs --force --segment_sentences --json processFulltextDocument
+
+# Process PDFs directly from a zip or tar.gz archive (streamed, not fully decompressed)
+grobid_client --input ~/papers.zip --output ~/results processFulltextDocument
+grobid_client --input ~/papers.tar.gz --output ~/results processFulltextDocument
 ```
+
+> [!NOTE]
+> When `--input` points to a `.zip`, `.tar`, `.tar.gz`/`.tgz` (or `.tar.bz2`/`.tbz2`) archive, the client streams the
+> eligible entries out of it in chunks of `batch_size` (from the config): each chunk is extracted to a temporary
+> directory, sent to GROBID, written to `--output`, and deleted before the next chunk is extracted. The archive is never
+> fully decompressed, so disk usage stays bounded regardless of its size. If `--output` is omitted, results are written to
+> a directory named after the archive (e.g. `papers.zip` → `papers/`).
 
 ### Python Library
 

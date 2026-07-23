@@ -671,3 +671,136 @@ class TestEdgeCases:
         result = client.get_server_url(service)
         expected = 'http://localhost:8070/api/processCitationPatentST36'
         assert result == expected
+
+
+class TestArchiveInput:
+    """Tests for streaming zip/tar archives as input (process_archive)."""
+
+    def _client(self, batch_size=2):
+        with patch('grobid_client.grobid_client.GrobidClient._test_server_connection'):
+            with patch('grobid_client.grobid_client.GrobidClient._configure_logging'):
+                client = GrobidClient(check_server=False)
+        client.logger = Mock()
+        client.config['batch_size'] = batch_size
+        return client
+
+    @staticmethod
+    def _make_zip(path, entries):
+        import zipfile
+        with zipfile.ZipFile(path, 'w') as z:
+            for name, data in entries.items():
+                z.writestr(name, data)
+
+    @staticmethod
+    def _make_targz(path, entries, work):
+        import tarfile
+        with tarfile.open(path, 'w:gz') as t:
+            for name, data in entries.items():
+                member_path = os.path.join(work, os.path.basename(name))
+                with open(member_path, 'wb') as f:
+                    f.write(data)
+                t.add(member_path, arcname=name)
+
+    def _run(self, client, archive, output):
+        """Run archive processing with a fake GROBID post; return set of temp dirs used."""
+        temp_dirs = set()
+
+        def fake_post(url, files=None, data=None, headers=None, timeout=None):
+            temp_dirs.add(os.path.dirname(files['input'][0]))
+            resp = Mock()
+            resp.text = '<TEI>ok</TEI>'
+            return (resp, 200)
+
+        with patch.object(GrobidClient, 'post', side_effect=fake_post):
+            client.process('processFulltextDocument', archive, output=output, force=True)
+        return temp_dirs
+
+    @staticmethod
+    def _tei_outputs(output_dir):
+        found = []
+        for root, _, files in os.walk(output_dir):
+            for f in files:
+                if f.endswith('.grobid.tei.xml'):
+                    found.append(f)
+        return sorted(found)
+
+    def test_is_archive(self):
+        client = self._client()
+        with tempfile.TemporaryDirectory() as d:
+            zip_path = os.path.join(d, 'x.zip')
+            self._make_zip(zip_path, {'a.pdf': b'%PDF'})
+            assert client._is_archive(zip_path) is True
+            assert client._is_archive(d) is False  # directory
+            assert client._is_archive(os.path.join(d, 'missing.zip')) is False
+
+    def test_archive_stem(self):
+        client = self._client()
+        assert client._archive_stem('/x/docs.tar.gz') == '/x/docs'
+        assert client._archive_stem('/x/docs.tgz') == '/x/docs'
+        assert client._archive_stem('/x/docs.zip') == '/x/docs'
+
+    def test_safe_member_path_blocks_traversal(self):
+        client = self._client()
+        dest = os.path.join('some', 'dest')
+        # traversal and absolute paths are neutralized to stay under dest
+        assert client._safe_member_path(dest, '../../etc/passwd') == os.path.join(dest, 'etc', 'passwd')
+        assert client._safe_member_path(dest, '/abs/evil.pdf') == os.path.join(dest, 'abs', 'evil.pdf')
+        assert client._safe_member_path(dest, '') is None
+        assert client._safe_member_path(dest, '.') is None
+
+    def test_process_zip_streams_all_pdfs(self):
+        client = self._client(batch_size=2)
+        with tempfile.TemporaryDirectory() as d:
+            zip_path = os.path.join(d, 'docs.zip')
+            self._make_zip(zip_path, {
+                'a.pdf': b'%PDF-a',
+                'sub/b.pdf': b'%PDF-b',
+                'c.PDF': b'%PDF-c',
+                'ignore.txt': b'not a pdf',
+            })
+            out = os.path.join(d, 'out')
+            temp_dirs = self._run(client, zip_path, out)
+
+            # all 3 PDFs processed, the .txt ignored
+            assert self._tei_outputs(out) == ['a.grobid.tei.xml', 'b.grobid.tei.xml', 'c.grobid.tei.xml']
+            # 3 files with batch_size 2 => 2 chunks => distinct temp dirs, all cleaned up
+            assert len(temp_dirs) >= 2
+            assert all(not os.path.exists(td) for td in temp_dirs)
+
+    def test_process_targz(self):
+        client = self._client(batch_size=10)
+        with tempfile.TemporaryDirectory() as d:
+            tar_path = os.path.join(d, 'docs.tar.gz')
+            self._make_targz(tar_path, {'x.pdf': b'%PDF-x', 'nested/y.pdf': b'%PDF-y'}, d)
+            out = os.path.join(d, 'out')
+            temp_dirs = self._run(client, tar_path, out)
+            assert self._tei_outputs(out) == ['x.grobid.tei.xml', 'y.grobid.tei.xml']
+            assert all(not os.path.exists(td) for td in temp_dirs)
+
+    def test_process_delegates_archive_to_process_archive(self):
+        client = self._client()
+        with tempfile.TemporaryDirectory() as d:
+            zip_path = os.path.join(d, 'docs.zip')
+            self._make_zip(zip_path, {'a.pdf': b'%PDF'})
+            with patch.object(GrobidClient, 'process_archive') as mock_archive:
+                client.process('processFulltextDocument', zip_path, output=os.path.join(d, 'o'))
+                mock_archive.assert_called_once()
+                assert mock_archive.call_args.args[1] == zip_path
+
+    def test_process_zip_default_output_named_after_archive(self):
+        client = self._client(batch_size=10)
+        with tempfile.TemporaryDirectory() as d:
+            zip_path = os.path.join(d, 'mydocs.zip')
+            self._make_zip(zip_path, {'a.pdf': b'%PDF'})
+            self._run(client, zip_path, None)  # no output -> defaults to <stem>
+            assert self._tei_outputs(os.path.join(d, 'mydocs')) == ['a.grobid.tei.xml']
+
+    def test_empty_archive_warns(self):
+        client = self._client()
+        with tempfile.TemporaryDirectory() as d:
+            zip_path = os.path.join(d, 'empty.zip')
+            self._make_zip(zip_path, {'notes.txt': b'no pdfs here'})
+            with patch.object(GrobidClient, 'process_batch') as mock_batch:
+                client.process('processFulltextDocument', zip_path, output=os.path.join(d, 'o'))
+                mock_batch.assert_not_called()
+            client.logger.warning.assert_called()
