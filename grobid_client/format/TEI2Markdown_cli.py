@@ -5,6 +5,8 @@ Standalone CLI for TEI2Markdown converter.
 This script provides a command-line interface for converting TEI XML files to Markdown format
 using the TEI2MarkdownConverter.
 """
+from __future__ import annotations
+
 import argparse
 import logging
 import sys
@@ -13,7 +15,7 @@ from pathlib import Path
 from .TEI2Markdown import TEI2MarkdownConverter
 
 
-def setup_logging(verbose: bool = False):
+def setup_logging(verbose: bool = False) -> None:
     """Setup logging configuration."""
     level = logging.INFO if verbose else logging.WARNING
     logging.basicConfig(
@@ -53,7 +55,7 @@ def convert_single_file(input_file: Path, output_file: Path, verbose: bool = Fal
         return False
 
 
-def main():
+def main() -> None:
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
         description="Convert TEI XML files to Markdown format using TEI2Markdown converter",

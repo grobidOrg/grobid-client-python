@@ -1,6 +1,10 @@
 """ Generic API Client """
+from __future__ import annotations
+
 from copy import deepcopy
 import json
+from typing import Any, Optional, Tuple
+
 import requests
 
 try:
@@ -16,12 +20,17 @@ class ApiClient(object):
     service methods, i.e. ``get``, ``post``, ``put`` and ``delete``.
     """
 
-    accept_type = "application/xml"
-    api_base = None
+    accept_type: str = "application/xml"
+    api_base: Optional[str] = None
 
     def __init__(
-        self, base_url, username=None, api_key=None, status_endpoint=None, timeout=60
-    ):
+        self,
+        base_url: str,
+        username: Optional[str] = None,
+        api_key: Optional[str] = None,
+        status_endpoint: Optional[str] = None,
+        timeout: int = 60,
+    ) -> None:
         """Initialise client.
 
         Args:
@@ -37,7 +46,7 @@ class ApiClient(object):
         self.timeout = timeout
 
     @staticmethod
-    def encode(request, data):
+    def encode(request: Any, data: Optional[dict]) -> Any:
         """Add request content data to request body, set Content-type header.
 
         Should be overridden by subclasses if not using JSON encoding.
@@ -58,7 +67,7 @@ class ApiClient(object):
         return request
 
     @staticmethod
-    def decode(response):
+    def decode(response: Any) -> Any:
         """Decode the returned data in the response.
 
         Should be overridden by subclasses if something else than JSON is
@@ -73,9 +82,9 @@ class ApiClient(object):
         try:
             return response.json()
         except ValueError as e:
-            return e.message
+            return e.message  # type: ignore[attr-defined]  # pre-existing (Python 2 style)
 
-    def get_credentials(self):
+    def get_credentials(self) -> dict:
         """Returns parameters to be added to authenticate the request.
 
         This lives on its own to make it easier to re-implement it if needed.
@@ -87,14 +96,14 @@ class ApiClient(object):
 
     def call_api(
         self,
-        method,
-        url,
-        headers=None,
-        params=None,
-        data=None,
-        files=None,
-        timeout=None,
-    ):
+        method: str,
+        url: str,
+        headers: Optional[dict] = None,
+        params: Optional[dict] = None,
+        data: Optional[dict] = None,
+        files: Optional[dict] = None,
+        timeout: Optional[int] = None,
+    ) -> Tuple[requests.Response, int]:
         """Call API.
 
         This returns object containing data, with error details if applicable.
@@ -130,7 +139,7 @@ class ApiClient(object):
 
         return r, r.status_code
 
-    def get(self, url, params=None, **kwargs):
+    def get(self, url: str, params: Optional[dict] = None, **kwargs: Any) -> Tuple[requests.Response, int]:
         """Call the API with a GET request.
 
         Args:
@@ -142,7 +151,7 @@ class ApiClient(object):
         """
         return self.call_api("GET", url, params=params, **kwargs)
 
-    def delete(self, url, params=None, **kwargs):
+    def delete(self, url: str, params: Optional[dict] = None, **kwargs: Any) -> Tuple[requests.Response, int]:
         """Call the API with a DELETE request.
 
         Args:
@@ -154,7 +163,14 @@ class ApiClient(object):
         """
         return self.call_api("DELETE", url, params=params, **kwargs)
 
-    def put(self, url, params=None, data=None, files=None, **kwargs):
+    def put(
+        self,
+        url: str,
+        params: Optional[dict] = None,
+        data: Optional[dict] = None,
+        files: Optional[dict] = None,
+        **kwargs: Any,
+    ) -> Tuple[requests.Response, int]:
         """Call the API with a PUT request.
 
         Args:
@@ -170,7 +186,14 @@ class ApiClient(object):
             "PUT", url, params=params, data=data, files=files, **kwargs
         )
 
-    def post(self, url, params=None, data=None, files=None, **kwargs):
+    def post(
+        self,
+        url: str,
+        params: Optional[dict] = None,
+        data: Optional[dict] = None,
+        files: Optional[dict] = None,
+        **kwargs: Any,
+    ) -> Tuple[requests.Response, int]:
         """Call the API with a POST request.
 
         Args:
@@ -186,7 +209,7 @@ class ApiClient(object):
             method="POST", url=url, params=params, data=data, files=files, **kwargs
         )
 
-    def service_status(self, **kwargs):
+    def service_status(self, **kwargs: Any) -> Tuple[requests.Response, int]:
         """Call the API to get the status of the service.
 
         Returns:

@@ -3,11 +3,13 @@ Package entry point for format converters.
 
 This provides a menu to choose between TEI2LossyJSON and TEI2Markdown converters.
 """
+from __future__ import annotations
+
 import argparse
 import sys
 
 
-def main():
+def main() -> None:
     """Main entry point that provides a menu for converter selection."""
 
     # Check if a converter was specified
