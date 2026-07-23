@@ -171,7 +171,7 @@ class TestGrobidClientIntegration:
                                         '/test',
                                         '/output',
                                         n=2,
-                                        generateIDs=False,
+                                        generate_ids=False,
                                         consolidate_header=False,
                                         consolidate_citations=False,
                                         include_raw_citations=False,
@@ -332,7 +332,7 @@ class TestGrobidClientIntegration:
                                         '/test',
                                         '/output',
                                         n=5,  # 5 concurrent threads
-                                        generateIDs=False,
+                                        generate_ids=False,
                                         consolidate_header=False,
                                         consolidate_citations=False,
                                         include_raw_citations=False,

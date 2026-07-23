@@ -134,13 +134,13 @@ grobid_client [OPTIONS] SERVICE
 
 | Option                       | Description                               |
 |------------------------------|-------------------------------------------|
-| `--generateIDs`              | Generate random XML IDs                   |
+| `--generate_ids`             | Generate random XML IDs                   |
 | `--consolidate_header`       | Consolidate header metadata               |
 | `--consolidate_citations`    | Consolidate bibliographic references      |
 | `--include_raw_citations`    | Include raw citation text                 |
 | `--include_raw_affiliations` | Include raw affiliation text              |
-| `--teiCoordinates`           | Add PDF coordinates to XML                |
-| `--segmentSentences`         | Segment sentences with coordinates        |
+| `--tei_coordinates`          | Add PDF coordinates to XML                |
+| `--segment_sentences`        | Segment sentences with coordinates        |
 | `--flavor`                   | Processing flavor for fulltext extraction |
 | `--json`                     | Convert TEI output to JSON format         |
 | `--markdown`                 | Convert TEI output to Markdown format     |
@@ -153,7 +153,7 @@ grobid_client [OPTIONS] SERVICE
 grobid_client --input ~/documents --output ~/results processFulltextDocument
 
 # High concurrency with coordinates
-grobid_client --input ~/pdfs --output ~/tei --n 20 --teiCoordinates processFulltextDocument
+grobid_client --input ~/pdfs --output ~/tei --n 20 --tei_coordinates processFulltextDocument
 
 # Process with JSON output
 grobid_client --input ~/pdfs --output ~/results --json processFulltextDocument
@@ -165,7 +165,7 @@ grobid_client --input ~/pdfs --output ~/results --markdown processFulltextDocume
 grobid_client --server https://grobid.example.com --input ~/citations.txt processCitationList
 
 # Force reprocessing with sentence segmentation and JSON output
-grobid_client --input ~/docs --force --segmentSentences --json processFulltextDocument
+grobid_client --input ~/docs --force --segment_sentences --json processFulltextDocument
 ```
 
 ### Python Library
@@ -202,10 +202,10 @@ client.process(
     input_path="/path/to/pdfs",
     output_path="/path/to/output",
     n=10,
-    generateIDs=True,
+    generate_ids=True,
     consolidate_header=True,
-    teiCoordinates=True,
-    segmentSentences=True
+    tei_coordinates=True,
+    segment_sentences=True
 )
 
 # Process with JSON output
@@ -454,7 +454,7 @@ When using the `--json` flag, the client converts TEI XML output to a structured
 grobid_client --input pdfs/ --output results/ --json processFulltextDocument
 
 # JSON output with coordinates and sentence segmentation
-grobid_client --input pdfs/ --output results/ --json --teiCoordinates --segmentSentences processFulltextDocument
+grobid_client --input pdfs/ --output results/ --json --tei_coordinates --segment_sentences processFulltextDocument
 ```
 
 ```python
@@ -535,7 +535,7 @@ Competing interests statement...
 grobid_client --input pdfs/ --output results/ --markdown processFulltextDocument
 
 # Markdown output with coordinates and sentence segmentation
-grobid_client --input pdfs/ --output results/ --markdown --teiCoordinates --segmentSentences processFulltextDocument
+grobid_client --input pdfs/ --output results/ --markdown --tei_coordinates --segment_sentences processFulltextDocument
 ```
 
 ```python
