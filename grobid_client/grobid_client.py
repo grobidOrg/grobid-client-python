@@ -47,6 +47,32 @@ class GrobidClient(ApiClient):
     # See https://github.com/grobidOrg/grobid-client-python/issues/54
     CONSOLIDATE_CITATIONS_MIN_TIMEOUT = 120
 
+    # Default output descriptor for TEI-producing services: (Accept header,
+    # output file suffix, binary output). All the "process*" services return
+    # TEI XML as text.
+    DEFAULT_SERVICE_OUTPUT: Tuple[str, str, bool] = ("text/plain", ".grobid.tei.xml", False)
+
+    # PDF annotation services return either JSON coordinates or an annotated
+    # (binary) PDF instead of TEI XML, so they need their own Accept header,
+    # output suffix and write mode.
+    # See https://github.com/grobidOrg/grobid-client-python/issues/79
+    SERVICE_OUTPUTS: dict = {
+        "referenceAnnotations": ("application/json", ".references.json", False),
+        "citationPatentAnnotations": ("application/json", ".patent-citations.json", False),
+        "annotatePDF": ("application/pdf", ".annotated.pdf", True),
+    }
+
+    # Client options (by their argument name) actually honored by each service.
+    # Services absent from this map accept the full set of options, so no
+    # warning is emitted for them. The annotation services (issue #79) only
+    # look at a subset, so passing anything else is a no-op server-side and the
+    # user is warned about it.
+    SERVICE_SUPPORTED_PARAMS: dict = {
+        "referenceAnnotations": {"consolidate_citations", "include_raw_citations"},
+        "citationPatentAnnotations": {"consolidate_citations"},
+        "annotatePDF": {"consolidate_citations"},
+    }
+
     # Default configuration values
     DEFAULT_CONFIG: dict = {
         'grobid_server': 'http://localhost:8070',
@@ -139,6 +165,35 @@ class GrobidClient(ApiClient):
                 f"frequently causes HTTP 408 (Request Timeout) errors. Consider increasing "
                 f"the 'timeout' setting to at least {self.CONSOLIDATE_CITATIONS_MIN_TIMEOUT}s "
                 f"(2-3 minutes is recommended)."
+            )
+
+    def _service_output(self, service: str) -> Tuple[str, str, bool]:
+        """Return the (Accept header, output suffix, is_binary) tuple for a service.
+
+        Annotation services (referenceAnnotations, annotatePDF,
+        citationPatentAnnotations) produce JSON or binary PDF output; every
+        other service produces TEI XML.
+        See https://github.com/grobidOrg/grobid-client-python/issues/79
+        """
+        return self.SERVICE_OUTPUTS.get(service, self.DEFAULT_SERVICE_OUTPUT)
+
+    def _warn_unsupported_service_params(self, service: str, requested_params: dict) -> None:
+        """Warn about requested options that the selected service ignores.
+
+        ``requested_params`` maps an option's argument name to whether the user
+        enabled it. Options that are set but not supported by ``service`` are
+        silently dropped by GROBID, so we surface them as a warning.
+        See https://github.com/grobidOrg/grobid-client-python/issues/79
+        """
+        supported = self.SERVICE_SUPPORTED_PARAMS.get(service)
+        if supported is None:
+            return
+
+        ignored = sorted(name for name, is_set in requested_params.items() if is_set and name not in supported)
+        if ignored:
+            self.logger.warning(
+                f"The following option(s) are not supported by the '{service}' service "
+                f"and will be ignored: {', '.join(ignored)}."
             )
 
     def _handle_server_busy_retry(self, file_path: str, retry_func: Any, *args: Any, **kwargs: Any) -> Any:
@@ -336,6 +391,7 @@ class GrobidClient(ApiClient):
             input_file: str,
             input_path: str,
             output: Optional[str],
+            suffix: str = ".grobid.tei.xml",
     ) -> str:
         # Use pathlib for consistent cross-platform path handling
         input_file_path = pathlib.Path(input_file)
@@ -344,10 +400,10 @@ class GrobidClient(ApiClient):
             # Calculate relative path from input_path, then join with output directory
             input_path_abs = pathlib.Path(input_path).resolve()
             input_file_rel = input_file_path.resolve().relative_to(input_path_abs)
-            filename = pathlib.Path(output) / f"{input_file_rel.stem}.grobid.tei.xml"
+            filename = pathlib.Path(output) / f"{input_file_rel.stem}{suffix}"
         else:
             # Use the same directory as the input file
-            filename = input_file_path.parent / f"{input_file_path.stem}.grobid.tei.xml"
+            filename = input_file_path.parent / f"{input_file_path.stem}{suffix}"
 
         return str(filename)
 
@@ -386,6 +442,19 @@ class GrobidClient(ApiClient):
         # the client-side timeout is too low.
         # See https://github.com/grobidOrg/grobid-client-python/issues/54
         self._warn_on_consolidation_timeout(consolidate_citations)
+
+        # Warn once if the caller enabled options that this service ignores
+        # (e.g. consolidate_header on an annotation service). See issue #79.
+        self._warn_unsupported_service_params(service, {
+            "generate_ids": generate_ids,
+            "consolidate_header": consolidate_header,
+            "consolidate_citations": consolidate_citations,
+            "include_raw_citations": include_raw_citations,
+            "include_raw_affiliations": include_raw_affiliations,
+            "tei_coordinates": tei_coordinates,
+            "segment_sentences": segment_sentences,
+            "flavor": bool(flavor),
+        })
 
         # First pass: count all eligible files
         all_input_files = []
@@ -518,20 +587,26 @@ class GrobidClient(ApiClient):
         error_count = 0
         skipped_count = 0
 
+        # Determine the output format for this service. Annotation services
+        # produce JSON or a binary PDF instead of TEI XML.
+        _, output_suffix, binary_output = self._service_output(service)
+        # TEI -> JSON/Markdown conversion only makes sense for TEI services.
+        tei_service = service not in self.SERVICE_OUTPUTS
+
         # we use ThreadPoolExecutor and not ProcessPoolExecutor because it is an I/O intensive process
         with concurrent.futures.ThreadPoolExecutor(max_workers=n) as executor:
             # with concurrent.futures.ProcessPoolExecutor(max_workers=n) as executor:
             results = []
             for input_file in input_files:
-                # check if TEI file is already produced
-                filename = self._output_file_name(input_file, input_path, output)
+                # check if the output file is already produced
+                filename = self._output_file_name(input_file, input_path, output, output_suffix)
                 if not force and os.path.isfile(filename):
                     self.logger.info(
                         f"{filename} already exists, skipping... (use --force to reprocess pdf input files)")
                     skipped_count += 1
 
                     # Check if JSON output is needed but JSON file doesn't exist
-                    if json_output:
+                    if tei_service and json_output:
                         json_filename = filename.replace('.grobid.tei.xml', '.json')
                         # Expand ~ to home directory before checking file existence
                         json_filename_expanded = os.path.expanduser(json_filename)
@@ -551,7 +626,7 @@ class GrobidClient(ApiClient):
                                 self.logger.error(f"Failed to convert TEI to JSON for {filename}: {str(e)}")
 
                     # Check if Markdown output is needed but Markdown file doesn't exist
-                    if markdown_output:
+                    if tei_service and markdown_output:
                         markdown_filename = filename.replace('.grobid.tei.xml', '.md')
                         # Expand ~ to home directory before checking file existence
                         markdown_filename_expanded = os.path.expanduser(markdown_filename)
@@ -599,7 +674,7 @@ class GrobidClient(ApiClient):
 
         for r in concurrent.futures.as_completed(results):
             input_file, status, text = r.result()
-            filename = self._output_file_name(input_file, input_path, output)
+            filename = self._output_file_name(input_file, input_path, output, output_suffix)
 
             if status != 200 or text is None:
                 self.logger.error(f"Processing of {input_file} failed with error {status}: {text}")
@@ -607,10 +682,14 @@ class GrobidClient(ApiClient):
                 # writing error file with suffixed error code
                 try:
                     pathlib.Path(os.path.dirname(filename)).mkdir(parents=True, exist_ok=True)
-                    error_filename = filename.replace(".grobid.tei.xml", f"_{status}.txt")
+                    if filename.endswith(output_suffix):
+                        error_filename = filename[:-len(output_suffix)] + f"_{status}.txt"
+                    else:
+                        error_filename = filename + f"_{status}.txt"
                     with open(error_filename, 'w', encoding='utf8') as error_file:
+                        # Error responses are always text, even for binary services
                         if text is not None:
-                            error_file.write(text)
+                            error_file.write(text if isinstance(text, str) else text.decode('utf-8', 'replace'))
                         else:
                             error_file.write("")
                     self.logger.info(f"Error details written to {error_filename}")
@@ -618,15 +697,21 @@ class GrobidClient(ApiClient):
                     self.logger.error(f"Failed to write error file {filename}: {str(e)}")
             else:
                 processed_count += 1
-                # writing TEI file
+                # writing output file
                 try:
                     pathlib.Path(os.path.dirname(filename)).mkdir(parents=True, exist_ok=True)
-                    with open(filename, 'w', encoding='utf8') as tei_file:
-                        tei_file.write(text)
-                    self.logger.debug(f"Successfully wrote TEI file: {filename}")
-                    
+                    if binary_output:
+                        # e.g. annotatePDF returns an annotated PDF (bytes)
+                        payload = text if isinstance(text, (bytes, bytearray)) else str(text).encode('utf-8')
+                        with open(filename, 'wb') as output_file_handle:
+                            output_file_handle.write(payload)
+                    else:
+                        with open(filename, 'w', encoding='utf8') as tei_file:
+                            tei_file.write(text)
+                    self.logger.debug(f"Successfully wrote output file: {filename}")
+
                     # Convert to JSON if requested
-                    if json_output:
+                    if tei_service and json_output:
                         try:
                             converter = TEI2LossyJSONConverter()
                             json_data = converter.convert_tei_file(filename, stream=False)
@@ -644,7 +729,7 @@ class GrobidClient(ApiClient):
                             self.logger.error(f"Failed to convert TEI to JSON for {filename}: {str(e)}")
                     
                     # Convert to Markdown if requested
-                    if markdown_output:
+                    if tei_service and markdown_output:
                         try:
                             from .format.TEI2Markdown import TEI2MarkdownConverter
                             converter = TEI2MarkdownConverter()
@@ -663,7 +748,7 @@ class GrobidClient(ApiClient):
                             self.logger.error(f"Failed to convert TEI to Markdown for {filename}: {str(e)}")
                             
                 except OSError as e:
-                    self.logger.error(f"Failed to write TEI XML file {filename}: {str(e)}")
+                    self.logger.error(f"Failed to write output file {filename}: {str(e)}")
 
         # Calculate batch statistics
         batch_runtime = time.time() - batch_start_time
@@ -691,7 +776,14 @@ class GrobidClient(ApiClient):
             flavor: Optional[str] = None,
             start: int = -1,
             end: int = -1
-    ) -> Tuple[str, int, Optional[str]]:
+    ) -> Tuple[str, int, Union[str, bytes, None]]:
+        """Send a PDF to GROBID and return (file, status, response).
+
+        The response is the TEI XML as text for the ``process*`` services, JSON
+        as text for the annotation services, and raw bytes for ``annotatePDF``,
+        which answers with an annotated PDF rather than a document description.
+        See https://github.com/grobidOrg/grobid-client-python/issues/79
+        """
         pdf_handle = None
         try:
             pdf_handle = open(pdf_file, "rb")
@@ -730,8 +822,9 @@ class GrobidClient(ApiClient):
             if end and end > 0:
                 the_data["end"] = str(end)
 
+            accept_header, _, binary_output = self._service_output(service)
             res, status = self.post(
-                url=the_url, files=files, data=the_data, headers={"Accept": "text/plain"},
+                url=the_url, files=files, data=the_data, headers={"Accept": accept_header},
                 timeout=self.config['timeout']
             )
 
@@ -753,8 +846,12 @@ class GrobidClient(ApiClient):
                     end
                 )
 
+            # Binary services (e.g. annotatePDF) return raw bytes on success;
+            # error responses are always text.
+            if binary_output and status == 200:
+                return (pdf_file, status, res.content)
             return (pdf_file, status, res.text)
-        
+
         except IOError as e:
             self.logger.error(f"Failed to open PDF file {pdf_file}: {str(e)}")
             return (pdf_file, 400, f"Failed to open file: {str(e)}")
@@ -852,7 +949,12 @@ def main() -> None:
         "processReferences",
         "processCitationList",
         "processCitationPatentST36",
-        "processCitationPatentPDF"
+        "processCitationPatentPDF",
+        # PDF annotation services (see issue #79). These return JSON coordinates
+        # or an annotated (binary) PDF rather than TEI XML.
+        "referenceAnnotations",
+        "annotatePDF",
+        "citationPatentAnnotations"
     ]
 
     parser = argparse.ArgumentParser(description="Client for GROBID services")
