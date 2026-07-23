@@ -1,0 +1,12 @@
+version: 2
+updates:
+  # Keep GitHub Actions used in the workflows up to date
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "ci"
