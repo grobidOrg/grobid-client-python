@@ -43,7 +43,7 @@ jobs:
           pytest tests/ -v --cov=grobid_client --cov-report=xml --cov-report=term-missing
       - name: Upload coverage to Codecov
         if: matrix.python-version == '3.11'
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238  # v4
         with:
           file: ./coverage.xml
           flags: unittests
