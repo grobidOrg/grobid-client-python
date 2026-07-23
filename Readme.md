@@ -298,6 +298,14 @@ settings.
 > Since version 0.0.12, the config file is optional. The client will use default localhost settings if no configuration
 > is provided.
 
+> [!WARNING]
+> **Citation consolidation and the `timeout` setting.** When `--consolidate_citations` (or `consolidate_citations=True`)
+> is enabled, GROBID queries external services (e.g. CrossRef) to enrich the extracted references. This is considerably
+> slower than a plain extraction, and a low `timeout` frequently causes `HTTP 408 (Request Timeout)` errors.
+> Set the `timeout` to at least **120 seconds (2-3 minutes recommended)** when consolidating citations. The client emits
+> a warning when consolidation is requested with a timeout below 120 seconds.
+> See [issue #54](https://github.com/grobidOrg/grobid-client-python/issues/54).
+
 ### Logging Configuration
 
 The client provides configurable logging with different verbosity levels. By default, only essential statistics and warnings are shown.

@@ -39,6 +39,11 @@ class ServerUnavailableException(Exception):
 
 
 class GrobidClient(ApiClient):
+    # Below this client-side timeout (in seconds) citation consolidation is
+    # likely to trigger HTTP 408 (Request Timeout) errors, so we warn the user.
+    # See https://github.com/grobidOrg/grobid-client-python/issues/54
+    CONSOLIDATE_CITATIONS_MIN_TIMEOUT = 120
+
     # Default configuration values
     DEFAULT_CONFIG = {
         'grobid_server': 'http://localhost:8070',
@@ -111,6 +116,27 @@ class GrobidClient(ApiClient):
         for key, value in params.items():
             if value is not None:
                 self.config[key] = value
+
+    def _warn_on_consolidation_timeout(self, consolidate_citations):
+        """Warn when citation consolidation is enabled with a low client timeout.
+
+        Consolidating citations makes GROBID query external services and can be
+        much slower than a plain extraction. A short client-side timeout often
+        leads to HTTP 408 errors, so we recommend at least a couple of minutes.
+        See https://github.com/grobidOrg/grobid-client-python/issues/54
+        """
+        if not consolidate_citations:
+            return
+
+        timeout = self.config.get("timeout", self.DEFAULT_CONFIG["timeout"])
+        if timeout < self.CONSOLIDATE_CITATIONS_MIN_TIMEOUT:
+            self.logger.warning(
+                f"Citation consolidation is enabled but the timeout is only {timeout}s. "
+                f"Consolidation queries external services and can be slow; a low timeout "
+                f"frequently causes HTTP 408 (Request Timeout) errors. Consider increasing "
+                f"the 'timeout' setting to at least {self.CONSOLIDATE_CITATIONS_MIN_TIMEOUT}s "
+                f"(2-3 minutes is recommended)."
+            )
 
     def _handle_server_busy_retry(self, file_path, retry_func, *args, **kwargs):
         """Handle server busy (503) retry logic."""
@@ -344,6 +370,13 @@ class GrobidClient(ApiClient):
     ):
         start_time = time.time()
         batch_size_pdf = self.config["batch_size"]
+
+        # Warn if citation consolidation is requested with a short timeout: the
+        # consolidation step queries external services (e.g. CrossRef) and can
+        # be significantly slower, frequently resulting in HTTP 408 errors when
+        # the client-side timeout is too low.
+        # See https://github.com/grobidOrg/grobid-client-python/issues/54
+        self._warn_on_consolidation_timeout(consolidate_citations)
 
         # First pass: count all eligible files
         all_input_files = []
