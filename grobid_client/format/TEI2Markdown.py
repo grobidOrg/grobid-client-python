@@ -11,9 +11,11 @@ Markdown format with the following sections:
 - Annex
 - References
 """
+from __future__ import annotations
+
 import re
 from pathlib import Path
-from typing import List, Dict, Union, Optional, BinaryIO
+from typing import Any, List, Dict, Union, Optional, BinaryIO
 from bs4 import BeautifulSoup, NavigableString, Tag
 import logging
 import dateparser
@@ -28,10 +30,10 @@ if not logger.handlers:
 class TEI2MarkdownConverter:
     """Converter that converts TEI XML to Markdown format."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         pass
 
-    def convert_tei_file(self, tei_file: Union[Path, BinaryIO]) -> Optional[str]:
+    def convert_tei_file(self, tei_file: Union[str, Path, BinaryIO]) -> Optional[str]:
         """Convert a TEI file to Markdown format.
         
         Args:
@@ -272,7 +274,7 @@ class TEI2MarkdownConverter:
 
         return "".join(annex_sections)
 
-    def _process_div_and_nested_divs(self, div: Tag, annex_sections: list) -> None:
+    def _process_div_and_nested_divs(self, div: Tag, annex_sections: list[str]) -> None:
         """Process a div element and its nested div elements."""
         # Add section header if present for this div (avoid duplicates)
         head = div.find("head")
@@ -456,7 +458,7 @@ class TEI2MarkdownConverter:
 
         return formatted_reference
 
-    def _extract_bibliographic_data(self, bibl_struct: Tag) -> dict:
+    def _extract_bibliographic_data(self, bibl_struct: Tag) -> dict[str, Any]:
         """
         Extract comprehensive bibliographic data from TEI structure.
 
@@ -499,7 +501,7 @@ class TEI2MarkdownConverter:
 
         return bib_data
 
-    def _process_analytic_section(self, analytic: Tag, bib_data: dict) -> None:
+    def _process_analytic_section(self, analytic: Tag, bib_data: dict[str, Any]) -> None:
         """Process the analytic section containing article-level information."""
         # Extract article title
         title = analytic.find("title", level="a")
@@ -512,7 +514,7 @@ class TEI2MarkdownConverter:
             if author_info:
                 bib_data['authors'].append(author_info)
 
-    def _process_monograph_section(self, monogr: Tag, bib_data: dict) -> None:
+    def _process_monograph_section(self, monogr: Tag, bib_data: dict[str, Any]) -> None:
         """Process the monograph section containing publication-level information."""
         # Extract title if no analytic title was found
         if not bib_data['title']:
@@ -537,7 +539,7 @@ class TEI2MarkdownConverter:
         if imprint:
             self._process_imprint_section(imprint, bib_data)
 
-    def _process_series_section(self, series: Tag, bib_data: dict) -> None:
+    def _process_series_section(self, series: Tag, bib_data: dict[str, Any]) -> None:
         """Process series information for multi-part publications."""
         series_title = series.find("title", level="s")
         if series_title and series_title.get_text().strip():
@@ -546,7 +548,7 @@ class TEI2MarkdownConverter:
             else:
                 bib_data['venue'] = series_title.get_text().strip()
 
-    def _process_imprint_section(self, imprint: Tag, bib_data: dict) -> None:
+    def _process_imprint_section(self, imprint: Tag, bib_data: dict[str, Any]) -> None:
         """Process the imprint section containing publication details."""
         # Extract publication date
         date = imprint.find("date")
@@ -579,7 +581,7 @@ class TEI2MarkdownConverter:
                     # Plain text, no from/to attributes
                     bib_data['pages'] = text
 
-    def _extract_author_info(self, author: Tag) -> dict:
+    def _extract_author_info(self, author: Tag) -> dict[str, str] | None:
         """Extract author information from a TEI author element."""
         author_info = {}
 
@@ -600,7 +602,7 @@ class TEI2MarkdownConverter:
 
         return author_info if author_info else None
 
-    def _extract_identifiers(self, bibl_struct: Tag, bib_data: dict) -> None:
+    def _extract_identifiers(self, bibl_struct: Tag, bib_data: dict[str, Any]) -> None:
         """Extract various identifier types from the bibliographic structure."""
         identifier_sections = [bibl_struct]
 
@@ -624,7 +626,7 @@ class TEI2MarkdownConverter:
                     if id_type and id_value:
                         bib_data['identifiers'][id_type] = id_value
 
-    def _extract_urls(self, bibl_struct: Tag, bib_data: dict) -> None:
+    def _extract_urls(self, bibl_struct: Tag, bib_data: dict[str, Any]) -> None:
         """Extract URLs and external links from ptr elements."""
         url_sections = [bibl_struct]
 
@@ -656,7 +658,7 @@ class TEI2MarkdownConverter:
         # Fallback to returning the original text
         return date_text.strip()
 
-    def _format_authors(self, authors: list) -> str:
+    def _format_authors(self, authors: list[dict[str, str]]) -> str:
         """Format author list for display."""
         formatted_authors = []
 
@@ -678,7 +680,7 @@ class TEI2MarkdownConverter:
         else:
             return f"{formatted_authors[0]} et al."
 
-    def _build_publication_details(self, ref_data: dict) -> str:
+    def _build_publication_details(self, ref_data: dict[str, Any]) -> str:
         """Build publication details string from extracted data."""
         details = []
 
@@ -696,7 +698,7 @@ class TEI2MarkdownConverter:
 
         return " ".join(details)
 
-    def _build_identifiers_and_links(self, ref_data: dict) -> list:
+    def _build_identifiers_and_links(self, ref_data: dict[str, Any]) -> list[str]:
         """Build list of formatted identifiers and links."""
         identifiers_and_links = []
 
@@ -727,7 +729,7 @@ class TEI2MarkdownConverter:
 
         return identifiers_and_links
 
-    def _extract_raw_reference(self, bibl_struct: Tag) -> str:
+    def _extract_raw_reference(self, bibl_struct: Tag) -> str | None:
         """Extract raw reference text as fallback."""
         # Look for raw reference notes
         raw_ref = bibl_struct.find("note", attrs={"type": "raw_reference"})
@@ -749,7 +751,7 @@ class TEI2MarkdownConverter:
 
 
 # Backwards compatible top-level function
-def convert_tei_file_to_markdown(tei_file: Union[Path, BinaryIO]) -> Optional[str]:
+def convert_tei_file_to_markdown(tei_file: Union[str, Path, BinaryIO]) -> Optional[str]:
     """Convert a TEI file to Markdown format.
     
     Args:

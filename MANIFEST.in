@@ -1,1 +1,2 @@
 include Readme.md
+include grobid_client/py.typed

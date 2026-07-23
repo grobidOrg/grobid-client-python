@@ -14,6 +14,8 @@ would require something scalable too (e.g. done in a separate thread),
 which is not implemented for the moment.
 
 """
+from __future__ import annotations
+
 import os
 import json
 import argparse
@@ -24,7 +26,7 @@ import re
 import requests
 import pathlib
 import logging
-from typing import Tuple
+from typing import Any, Optional, Tuple, Union
 import copy
 
 from .format.TEI2LossyJSON import TEI2LossyJSONConverter
@@ -34,7 +36,7 @@ from .client import ApiClient
 class ServerUnavailableException(Exception):
     """Exception raised when GROBID server is not available or not responding."""
 
-    def __init__(self, message="GROBID server is not available"):
+    def __init__(self, message: str = "GROBID server is not available") -> None:
         super().__init__(message)
         self.message = message
 
@@ -46,7 +48,7 @@ class GrobidClient(ApiClient):
     CONSOLIDATE_CITATIONS_MIN_TIMEOUT = 120
 
     # Default configuration values
-    DEFAULT_CONFIG = {
+    DEFAULT_CONFIG: dict = {
         'grobid_server': 'http://localhost:8070',
         'batch_size': 10,
         'sleep_time': 5,
@@ -77,15 +79,15 @@ class GrobidClient(ApiClient):
 
     def __init__(
             self,
-            grobid_server=None,
-            batch_size=None,
-            coordinates=None,
-            sleep_time=None,
-            timeout=None,
-            config_path=None,
-            check_server=True,
-            verbose=False
-    ):
+            grobid_server: Optional[str] = None,
+            batch_size: Optional[int] = None,
+            coordinates: Optional[list] = None,
+            sleep_time: Optional[int] = None,
+            timeout: Optional[int] = None,
+            config_path: Optional[str] = None,
+            check_server: bool = True,
+            verbose: bool = False
+    ) -> None:
         # Store verbose parameter for logging configuration
         self.verbose = verbose
 
@@ -112,13 +114,13 @@ class GrobidClient(ApiClient):
         if check_server:
             self._test_server_connection()
 
-    def _set_config_params(self, params):
+    def _set_config_params(self, params: dict) -> None:
         """Set configuration parameters, only if they are not None."""
         for key, value in params.items():
             if value is not None:
                 self.config[key] = value
 
-    def _warn_on_consolidation_timeout(self, consolidate_citations):
+    def _warn_on_consolidation_timeout(self, consolidate_citations: bool) -> None:
         """Warn when citation consolidation is enabled with a low client timeout.
 
         Consolidating citations makes GROBID query external services and can be
@@ -139,23 +141,25 @@ class GrobidClient(ApiClient):
                 f"(2-3 minutes is recommended)."
             )
 
-    def _handle_server_busy_retry(self, file_path, retry_func, *args, **kwargs):
+    def _handle_server_busy_retry(self, file_path: str, retry_func: Any, *args: Any, **kwargs: Any) -> Any:
         """Handle server busy (503) retry logic."""
         self.logger.warning(f"Server busy (503), retrying {file_path} after {self.config['sleep_time']} seconds")
         time.sleep(self.config["sleep_time"])
         return retry_func(*args, **kwargs)
 
-    def _handle_request_error(self, file_path, error, error_type="Request"):
+    def _handle_request_error(
+            self, file_path: str, error: Exception, error_type: str = "Request"
+    ) -> Tuple[str, int, str]:
         """Handle request errors with consistent logging and return format."""
         self.logger.error(f"{error_type} failed for {file_path}: {str(error)}")
         return (file_path, 500, f"{error_type} failed: {str(error)}")
 
-    def _handle_unexpected_error(self, file_path, error):
+    def _handle_unexpected_error(self, file_path: str, error: Exception) -> Tuple[str, int, str]:
         """Handle unexpected errors with consistent logging and return format."""
         self.logger.error(f"Unexpected error processing {file_path}: {str(error)}")
         return (file_path, 500, f"Unexpected error: {str(error)}")
 
-    def _configure_logging(self):
+    def _configure_logging(self) -> None:
         """Configure logging based on the configuration settings."""
         # Get logging config with defaults
         log_config = self.config.get('logging', {})
@@ -206,7 +210,7 @@ class GrobidClient(ApiClient):
                 backup_count = log_config.get('backup_count', 3)
 
                 from logging.handlers import RotatingFileHandler
-                file_handler = RotatingFileHandler(
+                file_handler: logging.Handler = RotatingFileHandler(
                     log_file,
                     maxBytes=max_bytes,
                     backupCount=backup_count
@@ -231,7 +235,7 @@ class GrobidClient(ApiClient):
         self.logger.info(
             f"Logging configured - Level: {log_level_str}, Console: {log_config.get('console', True)}, File: {log_file or 'disabled'}")
 
-    def _parse_file_size(self, size_str):
+    def _parse_file_size(self, size_str: Union[str, int]) -> int:
         """Parse file size string like '10MB', '1GB' to bytes."""
         size_str = str(size_str).upper().strip()
 
@@ -255,7 +259,7 @@ class GrobidClient(ApiClient):
 
         return int(number * multipliers.get(unit, 1))
 
-    def _load_config(self, path="./config.json"):
+    def _load_config(self, path: str = "./config.json") -> None:
         """
         Load and merge configuration from a JSON file with default values.
         If the file doesn't exist, keep the default values.
@@ -327,7 +331,12 @@ class GrobidClient(ApiClient):
             self.logger.error(error_msg)
             raise ServerUnavailableException(error_msg) from e
 
-    def _output_file_name(self, input_file, input_path, output):
+    def _output_file_name(
+            self,
+            input_file: str,
+            input_path: str,
+            output: Optional[str],
+    ) -> str:
         # Use pathlib for consistent cross-platform path handling
         input_file_path = pathlib.Path(input_file)
 
@@ -351,23 +360,23 @@ class GrobidClient(ApiClient):
 
     def process(
             self,
-            service,
-            input_path,
-            output=None,
-            n=10,
-            generate_ids=False,
-            consolidate_header=True,
-            consolidate_citations=False,
-            include_raw_citations=False,
-            include_raw_affiliations=False,
-            tei_coordinates=False,
-            segment_sentences=False,
-            force=True,
-            verbose=False,
-            flavor=None,
-            json_output=False,
-            markdown_output=False
-    ):
+            service: str,
+            input_path: str,
+            output: Optional[str] = None,
+            n: int = 10,
+            generate_ids: bool = False,
+            consolidate_header: bool = True,
+            consolidate_citations: bool = False,
+            include_raw_citations: bool = False,
+            include_raw_affiliations: bool = False,
+            tei_coordinates: bool = False,
+            segment_sentences: bool = False,
+            force: bool = True,
+            verbose: bool = False,
+            flavor: Optional[str] = None,
+            json_output: bool = False,
+            markdown_output: bool = False
+    ) -> None:
         start_time = time.time()
         batch_size_pdf = self.config["batch_size"]
 
@@ -483,24 +492,24 @@ class GrobidClient(ApiClient):
 
     def process_batch(
             self,
-            service,
-            input_files,
-            input_path,
-            output,
-            n,
-            generate_ids,
-            consolidate_header,
-            consolidate_citations,
-            include_raw_citations,
-            include_raw_affiliations,
-            tei_coordinates,
-            segment_sentences,
-            force,
-            verbose=False,
-            flavor=None,
-            json_output=False,
-            markdown_output=False
-    ):
+            service: str,
+            input_files: list,
+            input_path: str,
+            output: Optional[str],
+            n: int,
+            generate_ids: bool,
+            consolidate_header: bool,
+            consolidate_citations: bool,
+            include_raw_citations: bool,
+            include_raw_affiliations: bool,
+            tei_coordinates: bool,
+            segment_sentences: bool,
+            force: bool,
+            verbose: bool = False,
+            flavor: Optional[str] = None,
+            json_output: bool = False,
+            markdown_output: bool = False
+    ) -> Tuple[int, int, int]:
         batch_start_time = time.time()
         if verbose:
             self.logger.info(f"{len(input_files)} files to process in current batch")
@@ -529,7 +538,7 @@ class GrobidClient(ApiClient):
                         if not os.path.isfile(json_filename_expanded):
                             self.logger.info(f"JSON file {json_filename} does not exist, generating JSON from existing TEI...")
                             try:
-                                converter = TEI2LossyJSONConverter()
+                                converter: Any = TEI2LossyJSONConverter()
                                 json_data = converter.convert_tei_file(filename, stream=False)
 
                                 if json_data:
@@ -564,7 +573,7 @@ class GrobidClient(ApiClient):
 
                     continue
 
-                selected_process = self.process_pdf
+                selected_process: Any = self.process_pdf
                 if service == 'processCitationList':
                     selected_process = self.process_txt
 
@@ -670,19 +679,19 @@ class GrobidClient(ApiClient):
 
     def process_pdf(
             self,
-            service,
-            pdf_file,
-            generate_ids,
-            consolidate_header,
-            consolidate_citations,
-            include_raw_citations,
-            include_raw_affiliations,
-            tei_coordinates,
-            segment_sentences,
-            flavor=None,
-            start=-1,
-            end=-1
-    ):
+            service: str,
+            pdf_file: str,
+            generate_ids: bool,
+            consolidate_header: bool,
+            consolidate_citations: bool,
+            include_raw_citations: bool,
+            include_raw_affiliations: bool,
+            tei_coordinates: bool,
+            segment_sentences: bool,
+            flavor: Optional[str] = None,
+            start: int = -1,
+            end: int = -1
+    ) -> Tuple[str, int, Optional[str]]:
         pdf_handle = None
         try:
             pdf_handle = open(pdf_file, "rb")
@@ -760,24 +769,24 @@ class GrobidClient(ApiClient):
             if pdf_handle:
                 pdf_handle.close()
 
-    def get_server_url(self, service):
+    def get_server_url(self, service: str) -> str:
         return self.config['grobid_server'] + "/api/" + service
 
     def process_txt(
             self,
-            service,
-            txt_file,
-            generate_ids,
-            consolidate_header,
-            consolidate_citations,
-            include_raw_citations,
-            include_raw_affiliations,
-            tei_coordinates,
-            segment_sentences,
-            flavor=None,
-            start_page=-1,
-            end_page=-1
-    ):
+            service: str,
+            txt_file: str,
+            generate_ids: bool,
+            consolidate_header: bool,
+            consolidate_citations: bool,
+            include_raw_citations: bool,
+            include_raw_affiliations: bool,
+            tei_coordinates: bool,
+            segment_sentences: bool,
+            flavor: Optional[str] = None,
+            start_page: int = -1,
+            end_page: int = -1
+    ) -> Tuple[str, int, Optional[str]]:
         # create request based on file content
         try:
             with open(txt_file, 'r', encoding='utf-8') as f:
@@ -792,7 +801,7 @@ class GrobidClient(ApiClient):
         the_url = self.get_server_url(service)
 
         # set the GROBID parameters
-        the_data = {}
+        the_data: dict = {}
         if consolidate_citations:
             the_data["consolidateCitations"] = "1"
         if include_raw_citations:
@@ -826,7 +835,7 @@ class GrobidClient(ApiClient):
         return (txt_file, status, res.text)
 
 
-def main():
+def main() -> None:
     # Basic logging setup for initialization only
     # The actual logging configuration will be done by GrobidClient based on config.json
     temp_logger = logging.getLogger(__name__)

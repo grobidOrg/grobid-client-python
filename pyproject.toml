@@ -28,9 +28,33 @@ dependencies = {file = ["requirements.txt"]}
 
 [tool.setuptools_scm]
 
+[tool.mypy]
+# requests/bs4/lxml/dateparser ship varying (or no) type information.
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# The TEI converters rely heavily on BeautifulSoup's dynamic element API,
+# whose loose typing produces many false positives under mypy. Their runtime
+# behavior is covered by the conversion test-suite (tests/test_conversions.py).
+module = [
+    "grobid_client.format.TEI2LossyJSON",
+    "grobid_client.format.TEI2Markdown",
+    "grobid_client.format.validate_json_refs",
+]
+disable_error_code = [
+    "attr-defined", "union-attr", "arg-type", "assignment", "operator",
+    "index", "var-annotated", "return-value", "misc", "func-returns-value",
+    "str-bytes-safe",
+]
+
 [tool.setuptools]
-packages=['grobid_client']
+packages=['grobid_client', 'grobid_client.format']
 license-files = []
+
+[tool.setuptools.package-data]
+# Ship the PEP 561 marker so type checkers (e.g. mypy) pick up the inline
+# type hints of this package. See issue #71.
+grobid_client = ["py.typed"]
 
 [project.urls]
 Homepage = "https://github.com/kermitt2/grobid_client_python"

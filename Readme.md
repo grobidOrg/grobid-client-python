@@ -33,6 +33,7 @@ concurrent processing capabilities for PDF documents, reference strings, and pat
 - **Sentence Segmentation**: Layout-aware sentence segmentation capabilities
 - **JSON Output**: Convert TEI XML output to structured JSON format with CORD-19-like structure
 - **Markdown Output**: Convert TEI XML output to clean Markdown format with structured sections
+- **Type Hints**: Ships inline type annotations and a `py.typed` marker (PEP 561) for static type checking
 
 ## 📋 Prerequisites
 

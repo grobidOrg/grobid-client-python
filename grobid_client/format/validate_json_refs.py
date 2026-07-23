@@ -14,6 +14,7 @@ Usage:
 Example:
     python validate_json_refs.py ./output --verbose --output validation_report.json
 """
+from __future__ import annotations
 
 import json
 import os
@@ -28,7 +29,7 @@ import datetime
 class JSONReferenceValidator:
     """Validates reference offsets in JSON files."""
 
-    def __init__(self, verbose: bool = False):
+    def __init__(self, verbose: bool = False) -> None:
         self.verbose = verbose
         self.results = {
             'total_files': 0,
@@ -297,7 +298,7 @@ class JSONReferenceValidator:
             json.dump(report_data, f, indent=2, ensure_ascii=False)
 
 
-def main():
+def main() -> None:
     """Main function."""
     parser = argparse.ArgumentParser(
         description="Validate reference offsets in JSON files generated from TEI documents"
