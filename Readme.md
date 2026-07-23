@@ -117,6 +117,16 @@ grobid_client [OPTIONS] SERVICE
 | `processCitationList`       | Parse citation strings            | Text files (one citation per line) |
 | `processCitationPatentST36` | Process patent citations          | XML ST36 format                    |
 | `processCitationPatentPDF`  | Process patent PDFs               | PDF files                          |
+| `referenceAnnotations`      | Reference annotations (JSON coordinates) | PDF files                   |
+| `annotatePDF`               | Annotated PDF with reference/citation annotations | PDF files          |
+| `citationPatentAnnotations` | Patent citation annotations (JSON coordinates) | Patent PDF files      |
+
+> [!NOTE]
+> The annotation services (`referenceAnnotations`, `annotatePDF`, `citationPatentAnnotations`) do not produce TEI XML.
+> `referenceAnnotations` and `citationPatentAnnotations` write JSON coordinate files (`*.references.json`,
+> `*.patent-citations.json`), while `annotatePDF` writes an annotated PDF (`*.annotated.pdf`). The `--json` and
+> `--markdown` conversion options do not apply to these services.
+> See [issue #79](https://github.com/grobidOrg/grobid-client-python/issues/79).
 
 #### Common Options
 
@@ -166,6 +176,12 @@ grobid_client --server https://grobid.example.com --input ~/citations.txt proces
 
 # Force reprocessing with sentence segmentation and JSON output
 grobid_client --input ~/docs --force --segmentSentences --json processFulltextDocument
+
+# Reference annotations as JSON coordinates (writes *.references.json)
+grobid_client --input ~/pdfs --output ~/annotations referenceAnnotations
+
+# Annotated PDF with reference/citation annotations (writes *.annotated.pdf)
+grobid_client --input ~/pdfs --output ~/annotated annotatePDF
 ```
 
 ### Python Library

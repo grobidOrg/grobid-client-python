@@ -671,3 +671,92 @@ class TestEdgeCases:
         result = client.get_server_url(service)
         expected = 'http://localhost:8070/api/processCitationPatentST36'
         assert result == expected
+
+
+class TestAnnotationServices:
+    """Tests for the PDF annotation services (issue #79)."""
+
+    def _client(self):
+        with patch('grobid_client.grobid_client.GrobidClient._test_server_connection'):
+            with patch('grobid_client.grobid_client.GrobidClient._configure_logging'):
+                client = GrobidClient(check_server=False)
+        client.logger = Mock()
+        return client
+
+    def test_service_output_defaults_to_tei(self):
+        """Unknown/regular services fall back to the TEI output descriptor."""
+        client = self._client()
+        assert client._service_output('processFulltextDocument') == \
+            ('text/plain', '.grobid.tei.xml', False)
+
+    def test_service_output_annotation_services(self):
+        """Annotation services expose their own Accept header/suffix/binary flag."""
+        client = self._client()
+        assert client._service_output('referenceAnnotations') == \
+            ('application/json', '.references.json', False)
+        assert client._service_output('citationPatentAnnotations') == \
+            ('application/json', '.patent-citations.json', False)
+        assert client._service_output('annotatePDF') == \
+            ('application/pdf', '.annotated.pdf', True)
+
+    def test_output_file_name_with_custom_suffix(self):
+        """The output suffix is honoured when building the output file name."""
+        client = self._client()
+        result = client._output_file_name(
+            '/input/document.pdf', '/input', '/output', '.references.json')
+        assert result == '/output/document.references.json'
+
+    @patch('builtins.open', new_callable=mock_open)
+    @patch('grobid_client.grobid_client.GrobidClient.post')
+    def test_process_pdf_json_annotation_uses_json_accept(self, mock_post, mock_file):
+        """referenceAnnotations requests JSON and returns the response text."""
+        mock_response = Mock()
+        mock_response.text = '{"refs": []}'
+        mock_post.return_value = (mock_response, 200)
+
+        client = self._client()
+        result = client.process_pdf(
+            'referenceAnnotations', '/test/document.pdf',
+            generateIDs=False, consolidate_header=False, consolidate_citations=False,
+            include_raw_citations=False, include_raw_affiliations=False,
+            tei_coordinates=False, segment_sentences=False)
+
+        assert mock_post.call_args.kwargs['headers']['Accept'] == 'application/json'
+        assert result == ('/test/document.pdf', 200, '{"refs": []}')
+
+    @patch('builtins.open', new_callable=mock_open)
+    @patch('grobid_client.grobid_client.GrobidClient.post')
+    def test_process_pdf_annotate_returns_binary_content(self, mock_post, mock_file):
+        """annotatePDF requests a PDF and returns raw bytes on success."""
+        mock_response = Mock()
+        mock_response.content = b'%PDF-annotated'
+        mock_response.text = 'should not be used'
+        mock_post.return_value = (mock_response, 200)
+
+        client = self._client()
+        result = client.process_pdf(
+            'annotatePDF', '/test/document.pdf',
+            generateIDs=False, consolidate_header=False, consolidate_citations=False,
+            include_raw_citations=False, include_raw_affiliations=False,
+            tei_coordinates=False, segment_sentences=False)
+
+        assert mock_post.call_args.kwargs['headers']['Accept'] == 'application/pdf'
+        assert result == ('/test/document.pdf', 200, b'%PDF-annotated')
+
+    @patch('builtins.open', new_callable=mock_open)
+    @patch('grobid_client.grobid_client.GrobidClient.post')
+    def test_process_pdf_annotate_error_returns_text(self, mock_post, mock_file):
+        """On error, annotatePDF returns the response text (not bytes)."""
+        mock_response = Mock()
+        mock_response.content = b'binary'
+        mock_response.text = 'error detail'
+        mock_post.return_value = (mock_response, 500)
+
+        client = self._client()
+        result = client.process_pdf(
+            'annotatePDF', '/test/document.pdf',
+            generateIDs=False, consolidate_header=False, consolidate_citations=False,
+            include_raw_citations=False, include_raw_affiliations=False,
+            tei_coordinates=False, segment_sentences=False)
+
+        assert result == ('/test/document.pdf', 500, 'error detail')
