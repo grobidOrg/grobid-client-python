@@ -172,14 +172,21 @@ grobid_client --input ~/docs --force --segment_sentences --json processFulltextD
 # Process PDFs directly from a zip or tar.gz archive (streamed, not fully decompressed)
 grobid_client --input ~/papers.zip --output ~/results processFulltextDocument
 grobid_client --input ~/papers.tar.gz --output ~/results processFulltextDocument
+
+# --input also accepts glob patterns (quote them so the shell does not expand them)
+grobid_client --input "~/papers/*.zip"    --output ~/results processFulltextDocument   # many archives
+grobid_client --input "~/data/**/*.pdf"   --output ~/results processFulltextDocument   # PDFs in subdirectories
 ```
 
 > [!NOTE]
-> When `--input` points to a `.zip`, `.tar`, `.tar.gz`/`.tgz` (or `.tar.bz2`/`.tbz2`) archive, the client streams the
-> eligible entries out of it in chunks of `batch_size` (from the config): each chunk is extracted to a temporary
-> directory, sent to GROBID, written to `--output`, and deleted before the next chunk is extracted. The archive is never
-> fully decompressed, so disk usage stays bounded regardless of its size. If `--output` is omitted, results are written to
-> a directory named after the archive (e.g. `papers.zip` → `papers/`).
+> `--input` accepts a directory, a single file, an **archive**, or a **glob pattern**:
+> - **Archives** (`.zip`, `.tar`, `.tar.gz`/`.tgz`, `.tar.bz2`/`.tbz2`) are streamed: eligible entries are extracted in
+>   chunks of `batch_size` to a temporary directory, sent to GROBID, written to `--output`, and deleted before the next
+>   chunk. The archive is never fully decompressed, so disk usage stays bounded. If `--output` is omitted, results go to a
+>   directory named after the archive (e.g. `papers.zip` → `papers/`).
+> - **Glob patterns** (`paper.zip`, `paper*.zip`, `**/paper*.zip`, `**/*.pdf`, …) are expanded with `**` recursion; each
+>   match is handled by type (archive → streamed, directory → recursed, file → processed). Quote the pattern so your shell
+>   passes it through to the client unexpanded.
 
 ### Python Library
 

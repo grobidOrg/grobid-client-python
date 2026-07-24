@@ -233,41 +233,42 @@ class TestGrobidClient:
 
                 assert result == (True, 200)
 
-    @patch('os.walk')
-    def test_process_no_files_found(self, mock_walk):
+    def test_process_no_files_found(self):
         """Test process method when no eligible files are found."""
-        mock_walk.return_value = [('/test/path', [], [])]
-
-        with patch('grobid_client.grobid_client.GrobidClient._test_server_connection'):
-            with patch('grobid_client.grobid_client.GrobidClient._configure_logging'):
-                client = GrobidClient(check_server=False)
-                client.logger = Mock()
-
-                client.process('processFulltextDocument', '/test/path')
-
-                client.logger.warning.assert_called_with('No eligible files found in /test/path')
-
-    @patch('os.walk')
-    @patch('builtins.print')  # Mock print since we use print for statistics
-    def test_process_with_pdf_files(self, mock_print, mock_walk):
-        """Test process method with PDF files."""
-        mock_walk.return_value = [
-            ('/test/path', [], ['doc1.pdf', 'doc2.PDF', 'not_pdf.txt'])
-        ]
-
-        with patch('grobid_client.grobid_client.GrobidClient._test_server_connection'):
-            with patch('grobid_client.grobid_client.GrobidClient._configure_logging'):
-                with patch('grobid_client.grobid_client.GrobidClient.process_batch') as mock_batch:
-                    mock_batch.return_value = (2, 0, 0)  # Return tuple as expected (processed, errors, skipped)
+        with tempfile.TemporaryDirectory() as empty_dir:
+            with patch('grobid_client.grobid_client.GrobidClient._test_server_connection'):
+                with patch('grobid_client.grobid_client.GrobidClient._configure_logging'):
                     client = GrobidClient(check_server=False)
                     client.logger = Mock()
 
-                    client.process('processFulltextDocument', '/test/path')
+                    client.process('processFulltextDocument', empty_dir)
 
-                    mock_batch.assert_called_once()
-                    # Check that print was called for statistics
-                    print_calls = [call[0][0] for call in mock_print.call_args_list if 'Found' in call[0][0]]
-                    assert any('Found 2 file(s) to process' in call for call in print_calls)
+                    client.logger.warning.assert_called_with(
+                        f"No eligible files found in input '{empty_dir}'")
+
+    @patch('builtins.print')  # Mock print since we use print for statistics
+    def test_process_with_pdf_files(self, mock_print):
+        """Test process method with PDF files (directory input)."""
+        with tempfile.TemporaryDirectory() as input_dir:
+            for name in ('doc1.pdf', 'doc2.PDF', 'not_pdf.txt'):
+                with open(os.path.join(input_dir, name), 'wb') as f:
+                    f.write(b'x')
+
+            with patch('grobid_client.grobid_client.GrobidClient._test_server_connection'):
+                with patch('grobid_client.grobid_client.GrobidClient._configure_logging'):
+                    with patch('grobid_client.grobid_client.GrobidClient.process_batch') as mock_batch:
+                        mock_batch.return_value = (2, 0, 0)  # (processed, errors, skipped)
+                        client = GrobidClient(check_server=False)
+                        client.logger = Mock()
+
+                        client.process('processFulltextDocument', input_dir)
+
+                        mock_batch.assert_called_once()
+                        # only the 2 PDFs are batched, the .txt is ignored
+                        batched = mock_batch.call_args.args[1]
+                        assert len(batched) == 2
+                        print_calls = [call[0][0] for call in mock_print.call_args_list if 'Found' in call[0][0]]
+                        assert any('Found 2 file(s) to process' in call for call in print_calls)
 
     @patch('builtins.open', new_callable=mock_open)
     @patch('grobid_client.grobid_client.GrobidClient.post')
@@ -777,15 +778,15 @@ class TestArchiveInput:
             assert self._tei_outputs(out) == ['x.grobid.tei.xml', 'y.grobid.tei.xml']
             assert all(not os.path.exists(td) for td in temp_dirs)
 
-    def test_process_delegates_archive_to_process_archive(self):
+    def test_process_routes_archive_to_core(self):
         client = self._client()
         with tempfile.TemporaryDirectory() as d:
             zip_path = os.path.join(d, 'docs.zip')
             self._make_zip(zip_path, {'a.pdf': b'%PDF'})
-            with patch.object(GrobidClient, 'process_archive') as mock_archive:
+            with patch.object(GrobidClient, '_process_archive_core', return_value=(1, 1, 0, 0)) as mock_core:
                 client.process('processFulltextDocument', zip_path, output=os.path.join(d, 'o'))
-                mock_archive.assert_called_once()
-                assert mock_archive.call_args.args[1] == zip_path
+                mock_core.assert_called_once()
+                assert mock_core.call_args.args[1] == zip_path
 
     def test_process_zip_default_output_named_after_archive(self):
         client = self._client(batch_size=10)
@@ -804,3 +805,91 @@ class TestArchiveInput:
                 client.process('processFulltextDocument', zip_path, output=os.path.join(d, 'o'))
                 mock_batch.assert_not_called()
             client.logger.warning.assert_called()
+
+
+class TestGlobInput:
+    """Tests for glob-pattern input resolution (--input as a glob)."""
+
+    def _client(self, batch_size=50):
+        with patch('grobid_client.grobid_client.GrobidClient._test_server_connection'):
+            with patch('grobid_client.grobid_client.GrobidClient._configure_logging'):
+                client = GrobidClient(check_server=False)
+        client.logger = Mock()
+        client.config['batch_size'] = batch_size
+        return client
+
+    @staticmethod
+    def _zip(path, entries):
+        import zipfile
+        with zipfile.ZipFile(path, 'w') as z:
+            for name, data in entries.items():
+                z.writestr(name, data)
+
+    @staticmethod
+    def _tei_outputs(output_dir):
+        found = []
+        for root, _, files in os.walk(output_dir):
+            for f in files:
+                if f.endswith('.grobid.tei.xml'):
+                    found.append(f)
+        return sorted(found)
+
+    def _run(self, client, pattern, output):
+        def fake_post(url, files=None, data=None, headers=None, timeout=None):
+            resp = Mock()
+            resp.text = '<TEI>ok</TEI>'
+            return (resp, 200)
+        with patch.object(GrobidClient, 'post', side_effect=fake_post):
+            client.process('processFulltextDocument', pattern, output=output, force=True)
+
+    def test_resolve_input_paths_plain_and_glob(self):
+        client = self._client()
+        # plain path (no magic) returned as-is even if missing
+        assert client._resolve_input_paths('/nope/x.zip') == ['/nope/x.zip']
+        with tempfile.TemporaryDirectory() as d:
+            for n in ('paper1.zip', 'paper2.zip', 'other.zip'):
+                open(os.path.join(d, n), 'wb').close()
+            matches = client._resolve_input_paths(os.path.join(d, 'paper*.zip'))
+            assert [os.path.basename(m) for m in matches] == ['paper1.zip', 'paper2.zip']
+
+    def test_glob_matches_multiple_archives(self):
+        client = self._client()
+        with tempfile.TemporaryDirectory() as d:
+            self._zip(os.path.join(d, 'paper1.zip'), {'a.pdf': b'%PDF-a'})
+            self._zip(os.path.join(d, 'paper2.zip'), {'b.pdf': b'%PDF-b'})
+            self._zip(os.path.join(d, 'skip.zip'), {'c.pdf': b'%PDF-c'})
+            out = os.path.join(d, 'out')
+            self._run(client, os.path.join(d, 'paper*.zip'), out)
+            # only paper1/paper2 archives, skip.zip excluded by the pattern
+            assert self._tei_outputs(out) == ['a.grobid.tei.xml', 'b.grobid.tei.xml']
+
+    def test_glob_recursive_pdfs_across_subdirs(self):
+        client = self._client()
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, 'sub1'))
+            os.makedirs(os.path.join(d, 'sub2'))
+            open(os.path.join(d, 'sub1', 'a.pdf'), 'wb').close()
+            open(os.path.join(d, 'sub2', 'b.pdf'), 'wb').close()
+            open(os.path.join(d, 'sub2', 'note.txt'), 'wb').close()
+            out = os.path.join(d, 'out')
+            self._run(client, os.path.join(d, '**', '*.pdf'), out)
+            assert self._tei_outputs(out) == ['a.grobid.tei.xml', 'b.grobid.tei.xml']
+
+    def test_glob_no_match_warns(self):
+        client = self._client()
+        with tempfile.TemporaryDirectory() as d:
+            client.process('processFulltextDocument', os.path.join(d, 'nothing*.zip'),
+                           output=os.path.join(d, 'o'))
+            client.logger.warning.assert_called()
+            assert "No files match" in client.logger.warning.call_args[0][0]
+
+    def test_common_base_is_ancestor(self):
+        client = self._client()
+        with tempfile.TemporaryDirectory() as d:
+            f1 = os.path.join(d, 'x', 'a.pdf')
+            f2 = os.path.join(d, 'y', 'b.pdf')
+            os.makedirs(os.path.dirname(f1)); os.makedirs(os.path.dirname(f2))
+            open(f1, 'wb').close(); open(f2, 'wb').close()
+            base = client._common_base([f1, f2])
+            assert os.path.isdir(base)
+            assert f1.startswith(base) and f2.startswith(base)

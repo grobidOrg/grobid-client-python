@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import json
 import argparse
+import glob
 import time
 import concurrent.futures
 import ntpath
@@ -386,31 +387,7 @@ class GrobidClient(ApiClient):
             json_output: bool = False,
             markdown_output: bool = False
     ) -> None:
-        # If the input is a zip/tar archive, stream its entries out one chunk at
-        # a time instead of walking a directory. This never fully decompresses
-        # the archive and keeps disk usage bounded.
-        if input_path is not None and self._is_archive(input_path):
-            return self.process_archive(
-                service,
-                input_path,
-                output=output,
-                n=n,
-                generate_ids=generate_ids,
-                consolidate_header=consolidate_header,
-                consolidate_citations=consolidate_citations,
-                include_raw_citations=include_raw_citations,
-                include_raw_affiliations=include_raw_affiliations,
-                tei_coordinates=tei_coordinates,
-                segment_sentences=segment_sentences,
-                force=force,
-                verbose=verbose,
-                flavor=flavor,
-                json_output=json_output,
-                markdown_output=markdown_output,
-            )
-
         start_time = time.time()
-        batch_size_pdf = self.config["batch_size"]
 
         # Warn if citation consolidation is requested with a short timeout: the
         # consolidation step queries external services (e.g. CrossRef) and can
@@ -419,104 +396,190 @@ class GrobidClient(ApiClient):
         # See https://github.com/grobidOrg/grobid-client-python/issues/54
         self._warn_on_consolidation_timeout(consolidate_citations)
 
-        # First pass: count all eligible files
-        all_input_files = []
-        for (dirpath, dirnames, filenames) in os.walk(input_path):
-            for filename in filenames:
-                if self._is_eligible_input(filename, service):
-                    full_path = os.sep.join([dirpath, filename])
-                    all_input_files.append(full_path)
-
-        # Log total files found
-        total_files = len(all_input_files)
-        if total_files == 0:
-            self.logger.warning(f"No eligible files found in {input_path}")
+        if input_path is None:
+            self.logger.warning("No input path provided")
             return
 
-        # Counters for processing statistics (initialize before early return)
+        # input_path may be a plain directory/file/archive or a glob pattern
+        # (e.g. "paper*.zip", "**/*.pdf"). Resolve it to concrete paths.
+        matched_paths = self._resolve_input_paths(input_path)
+        if not matched_paths:
+            self.logger.warning(f"No files match input '{input_path}'")
+            return
+
+        # Partition matches into archives (streamed) and plain filesystem files
+        # (directories are expanded to their eligible files).
+        archive_paths = []
+        fs_files = []
+        for path in matched_paths:
+            if self._is_archive(path):
+                archive_paths.append(path)
+            elif os.path.isdir(path):
+                fs_files.extend(self._collect_directory_files(path, service))
+            elif os.path.isfile(path) and self._is_eligible_input(os.path.basename(path), service):
+                fs_files.append(path)
+            else:
+                self.logger.debug(f"Skipping input (not an eligible file/dir/archive): {path}")
+
+        if not fs_files and not archive_paths:
+            self.logger.warning(f"No eligible files found in input '{input_path}'")
+            return
+
+        processed_files_count = 0
+        errors_files_count = 0
+        skipped_files_count = 0
+        total_files = 0
+
+        # Plain files gathered from directories and/or loose glob matches
+        if fs_files:
+            print(f"Found {len(fs_files)} file(s) to process")
+            batch_processed, batch_errors, batch_skipped = self._run_file_batches(
+                service, fs_files, self._common_base(fs_files), output, n,
+                generate_ids, consolidate_header, consolidate_citations,
+                include_raw_citations, include_raw_affiliations, tei_coordinates,
+                segment_sentences, force, verbose, flavor, json_output, markdown_output
+            )
+            processed_files_count += batch_processed
+            errors_files_count += batch_errors
+            skipped_files_count += batch_skipped
+            total_files += len(fs_files)
+
+        # Archives are streamed entry-by-entry, one batch-sized chunk at a time
+        for archive_path in archive_paths:
+            arc_total, arc_processed, arc_errors, arc_skipped = self._process_archive_core(
+                service, archive_path, output, n,
+                generate_ids, consolidate_header, consolidate_citations,
+                include_raw_citations, include_raw_affiliations, tei_coordinates,
+                segment_sentences, force, verbose, flavor, json_output, markdown_output
+            )
+            processed_files_count += arc_processed
+            errors_files_count += arc_errors
+            skipped_files_count += arc_skipped
+            total_files += arc_total
+
+        if total_files == 0:
+            self.logger.warning(f"No eligible files found in input '{input_path}'")
+            return
+
+        runtime = time.time() - start_time
+        self._print_processing_summary(
+            processed_files_count, errors_files_count, skipped_files_count, total_files, runtime
+        )
+
+    def _resolve_input_paths(self, input_path):
+        """Resolve an input path into a sorted list of concrete paths.
+
+        Supports shell-style glob patterns (including the recursive ``**``) and
+        ``~`` expansion. A plain path without glob metacharacters is returned
+        as-is (so callers can still handle a missing path themselves).
+        """
+        expanded = os.path.expanduser(input_path)
+        if glob.has_magic(expanded):
+            return sorted(glob.glob(expanded, recursive=True))
+        return [expanded]
+
+    def _collect_directory_files(self, directory, service):
+        """Recursively collect eligible input files from a directory."""
+        files = []
+        for path in sorted(pathlib.Path(directory).rglob('*')):
+            if path.is_file() and self._is_eligible_input(path.name, service):
+                files.append(str(path))
+        return files
+
+    def _common_base(self, files):
+        """Return a directory that is an ancestor of all given files.
+
+        Used as ``input_path`` for output-name computation; only needs to be a
+        common ancestor so ``Path.relative_to`` does not fail.
+        """
+        abs_files = [os.path.abspath(f) for f in files]
+        if len(abs_files) == 1:
+            return os.path.dirname(abs_files[0])
+        try:
+            base = os.path.commonpath(abs_files)
+        except ValueError:
+            # e.g. paths on different drives (Windows); fall back to first parent
+            return os.path.dirname(abs_files[0])
+        return base if os.path.isdir(base) else os.path.dirname(base)
+
+    def _print_processing_summary(self, processed, errors, skipped, total, runtime):
+        """Print the final processing statistics (shared by all input modes)."""
+        docs_per_second = processed / runtime if runtime > 0 else 0
+        seconds_per_doc = runtime / processed if processed > 0 else 0
+
+        print(f"Processing completed: {processed} out of {total} files processed")
+        print(f"Errors: {errors} out of {total} files processed")
+        if skipped > 0:
+            print(f"Skipped: {skipped} out of {total} files (already existed, use --force to reprocess)")
+
+        print(f"⏱️  Total runtime: {runtime:.2f} seconds")
+        print(f"🚀 Speed: {docs_per_second:.2f} documents/second")
+        print(f" Throughput: {seconds_per_doc:.2f} seconds/document")
+
+    def _run_file_batches(
+            self,
+            service,
+            input_files,
+            input_path,
+            output,
+            n,
+            generate_ids,
+            consolidate_header,
+            consolidate_citations,
+            include_raw_citations,
+            include_raw_affiliations,
+            tei_coordinates,
+            segment_sentences,
+            force,
+            verbose,
+            flavor,
+            json_output,
+            markdown_output
+    ):
+        """Run process_batch over a list of files in chunks of batch_size.
+
+        Returns the aggregated (processed, errors, skipped) counts.
+        """
+        batch_size_pdf = self.config["batch_size"]
         processed_files_count = 0
         errors_files_count = 0
         skipped_files_count = 0
 
-        print(f"Found {total_files} file(s) to process")
-        input_files = []
-
-        for input_file in all_input_files:
-            # Extract just the filename for verbose logging
-            filename = os.path.basename(input_file)
-
+        batch = []
+        for input_file in input_files:
             if verbose:
                 try:
-                    self.logger.info(f"Found file: {filename}")
+                    self.logger.info(f"Found file: {os.path.basename(input_file)}")
                 except UnicodeEncodeError:
                     # may happen on linux see https://stackoverflow.com/questions/27366479/python-3-os-walk-file-paths-unicodeencodeerror-utf-8-codec-cant-encode-s
-                    self.logger.warning(f"Could not log filename due to encoding issues")
+                    self.logger.warning("Could not log filename due to encoding issues")
 
-            input_files.append(input_file)
+            batch.append(input_file)
 
-            if len(input_files) == batch_size_pdf:
+            if len(batch) == batch_size_pdf:
                 batch_processed, batch_errors, batch_skipped = self.process_batch(
-                    service,
-                    input_files,
-                    input_path,
-                    output,
-                    n,
-                    generate_ids,
-                    consolidate_header,
-                    consolidate_citations,
-                    include_raw_citations,
-                    include_raw_affiliations,
-                    tei_coordinates,
-                    segment_sentences,
-                    force,
-                    verbose,
-                    flavor,
-                    json_output,
-                    markdown_output
+                    service, batch, input_path, output, n, generate_ids,
+                    consolidate_header, consolidate_citations, include_raw_citations,
+                    include_raw_affiliations, tei_coordinates, segment_sentences,
+                    force, verbose, flavor, json_output, markdown_output
                 )
                 processed_files_count += batch_processed
                 errors_files_count += batch_errors
                 skipped_files_count += batch_skipped
-                input_files = []
+                batch = []
 
-        # last batch
-        if len(input_files) > 0:
+        if batch:
             batch_processed, batch_errors, batch_skipped = self.process_batch(
-                service,
-                input_files,
-                input_path,
-                output,
-                n,
-                generate_ids,
-                consolidate_header,
-                consolidate_citations,
-                include_raw_citations,
-                include_raw_affiliations,
-                tei_coordinates,
-                segment_sentences,
-                force,
-                verbose,
-                flavor,
-                json_output,
-                markdown_output
+                service, batch, input_path, output, n, generate_ids,
+                consolidate_header, consolidate_citations, include_raw_citations,
+                include_raw_affiliations, tei_coordinates, segment_sentences,
+                force, verbose, flavor, json_output, markdown_output
             )
             processed_files_count += batch_processed
             errors_files_count += batch_errors
             skipped_files_count += batch_skipped
 
-        runtime = time.time() - start_time
-        docs_per_second = processed_files_count / runtime if runtime > 0 else 0
-        seconds_per_doc = runtime / processed_files_count if processed_files_count > 0 else 0
-
-        # Log final statistics - always visible
-        print(f"Processing completed: {processed_files_count} out of {total_files} files processed")
-        print(f"Errors: {errors_files_count} out of {total_files} files processed")
-        if skipped_files_count > 0:
-            print(f"Skipped: {skipped_files_count} out of {total_files} files (already existed, use --force to reprocess)")
-        
-        print(f"⏱️  Total runtime: {runtime:.2f} seconds")
-        print(f"🚀 Speed: {docs_per_second:.2f} documents/second")
-        print(f" Throughput: {seconds_per_doc:.2f} seconds/document")
+        return processed_files_count, errors_files_count, skipped_files_count
 
     def _is_eligible_input(self, filename, service):
         """Return True if a file name is a valid input for the given service."""
@@ -631,8 +694,46 @@ class GrobidClient(ApiClient):
         result, in ``output``).
         """
         start_time = time.time()
-        batch_size_pdf = self.config["batch_size"]
         self._warn_on_consolidation_timeout(consolidate_citations)
+
+        total_files, processed, errors, skipped = self._process_archive_core(
+            service, archive_path, output, n, generate_ids, consolidate_header,
+            consolidate_citations, include_raw_citations, include_raw_affiliations,
+            tei_coordinates, segment_sentences, force, verbose, flavor,
+            json_output, markdown_output
+        )
+
+        if total_files == 0:
+            return
+
+        runtime = time.time() - start_time
+        self._print_processing_summary(processed, errors, skipped, total_files, runtime)
+
+    def _process_archive_core(
+            self,
+            service,
+            archive_path,
+            output,
+            n,
+            generate_ids,
+            consolidate_header,
+            consolidate_citations,
+            include_raw_citations,
+            include_raw_affiliations,
+            tei_coordinates,
+            segment_sentences,
+            force,
+            verbose,
+            flavor,
+            json_output,
+            markdown_output
+    ):
+        """Stream and process an archive; return (total, processed, errors, skipped).
+
+        Does not print the final summary (the caller does), so it can be
+        aggregated with other inputs when resolving a glob pattern.
+        """
+        batch_size_pdf = self.config["batch_size"]
 
         # Results must survive the temporary extraction directories, so when no
         # output is given we default to a directory named after the archive.
@@ -643,7 +744,7 @@ class GrobidClient(ApiClient):
             kind, archive, member_names = self._open_archive(archive_path)
         except (zipfile.BadZipFile, tarfile.TarError, OSError) as e:
             self.logger.error(f"Could not open archive {archive_path}: {str(e)}")
-            return
+            return 0, 0, 0, 0
 
         processed_files_count = 0
         errors_files_count = 0
@@ -658,7 +759,7 @@ class GrobidClient(ApiClient):
             total_files = len(eligible_members)
             if total_files == 0:
                 self.logger.warning(f"No eligible files found in archive {archive_path}")
-                return
+                return 0, 0, 0, 0
 
             print(f"Found {total_files} file(s) to process in {archive_path}")
 
@@ -704,21 +805,7 @@ class GrobidClient(ApiClient):
         finally:
             archive.close()
 
-        if total_files == 0:
-            return
-
-        runtime = time.time() - start_time
-        docs_per_second = processed_files_count / runtime if runtime > 0 else 0
-        seconds_per_doc = runtime / processed_files_count if processed_files_count > 0 else 0
-
-        print(f"Processing completed: {processed_files_count} out of {total_files} files processed")
-        print(f"Errors: {errors_files_count} out of {total_files} files processed")
-        if skipped_files_count > 0:
-            print(f"Skipped: {skipped_files_count} out of {total_files} files (already existed, use --force to reprocess)")
-
-        print(f"⏱️  Total runtime: {runtime:.2f} seconds")
-        print(f"🚀 Speed: {docs_per_second:.2f} documents/second")
-        print(f" Throughput: {seconds_per_doc:.2f} seconds/document")
+        return total_files, processed_files_count, errors_files_count, skipped_files_count
 
     def process_batch(
             self,
