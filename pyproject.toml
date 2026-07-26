@@ -23,6 +23,11 @@ readme = "Readme.md"
 
 dynamic = ['version', "dependencies"]
 
+[project.optional-dependencies]
+# Streaming inputs directly from S3 (s3:// URIs/prefixes). smart_open provides
+# a seekable, range-streamed reader so remote zips are never fully downloaded.
+s3 = ["smart_open[s3]>=6.0", "boto3"]
+
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}
 

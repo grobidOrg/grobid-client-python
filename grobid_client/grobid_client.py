@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import json
 import argparse
+import fnmatch
 import glob
 import time
 import concurrent.futures
@@ -387,32 +388,71 @@ class GrobidClient(ApiClient):
             json_output: bool = False,
             markdown_output: bool = False
     ) -> None:
-        start_time = time.time()
-
-        # Warn if citation consolidation is requested with a short timeout: the
-        # consolidation step queries external services (e.g. CrossRef) and can
-        # be significantly slower, frequently resulting in HTTP 408 errors when
-        # the client-side timeout is too low.
-        # See https://github.com/grobidOrg/grobid-client-python/issues/54
-        self._warn_on_consolidation_timeout(consolidate_citations)
-
         if input_path is None:
             self.logger.warning("No input path provided")
             return
+        return self.process_paths(
+            service, [input_path], output=output, n=n, generate_ids=generate_ids,
+            consolidate_header=consolidate_header, consolidate_citations=consolidate_citations,
+            include_raw_citations=include_raw_citations,
+            include_raw_affiliations=include_raw_affiliations,
+            tei_coordinates=tei_coordinates, segment_sentences=segment_sentences,
+            force=force, verbose=verbose, flavor=flavor,
+            json_output=json_output, markdown_output=markdown_output,
+        )
 
-        # input_path may be a plain directory/file/archive or a glob pattern
-        # (e.g. "paper*.zip", "**/*.pdf"). Resolve it to concrete paths.
-        matched_paths = self._resolve_input_paths(input_path)
+    def process_paths(
+            self,
+            service,
+            inputs,
+            output=None,
+            n=10,
+            generate_ids=False,
+            consolidate_header=True,
+            consolidate_citations=False,
+            include_raw_citations=False,
+            include_raw_affiliations=False,
+            tei_coordinates=False,
+            segment_sentences=False,
+            force=True,
+            verbose=False,
+            flavor=None,
+            json_output=False,
+            markdown_output=False
+    ):
+        """Process a list of inputs.
+
+        Each input may be a local path, a shell glob (``**/*.pdf``), a directory,
+        a local archive, or an ``s3://`` object/prefix/glob. This backs both the
+        ``--input`` option (a single input) and ``--input-list`` (a manifest file
+        of paths). Results from all inputs are aggregated into one summary.
+        """
+        start_time = time.time()
+
+        # See https://github.com/grobidOrg/grobid-client-python/issues/54
+        self._warn_on_consolidation_timeout(consolidate_citations)
+
+        matched_paths = []
+        for inp in inputs:
+            matched_paths.extend(self._resolve_input_paths(inp))
         if not matched_paths:
-            self.logger.warning(f"No files match input '{input_path}'")
+            self.logger.warning(f"No files match input(s): {inputs}")
             return
 
-        # Partition matches into archives (streamed) and plain filesystem files
-        # (directories are expanded to their eligible files).
+        # Partition into archives (streamed), remote loose files (s3) and local
+        # filesystem files (directories are expanded to their eligible files).
         archive_paths = []
+        remote_files = []
         fs_files = []
         for path in matched_paths:
-            if self._is_archive(path):
+            if self._is_s3(path):
+                if self._looks_like_archive(path):
+                    archive_paths.append(path)
+                elif self._is_eligible_input(self._s3_basename(path), service):
+                    remote_files.append(path)
+                else:
+                    self.logger.debug(f"Skipping s3 input (not an eligible file/archive): {path}")
+            elif self._is_archive(path):
                 archive_paths.append(path)
             elif os.path.isdir(path):
                 fs_files.extend(self._collect_directory_files(path, service))
@@ -421,8 +461,8 @@ class GrobidClient(ApiClient):
             else:
                 self.logger.debug(f"Skipping input (not an eligible file/dir/archive): {path}")
 
-        if not fs_files and not archive_paths:
-            self.logger.warning(f"No eligible files found in input '{input_path}'")
+        if not fs_files and not archive_paths and not remote_files:
+            self.logger.warning(f"No eligible files found in input(s): {inputs}")
             return
 
         processed_files_count = 0
@@ -430,35 +470,48 @@ class GrobidClient(ApiClient):
         skipped_files_count = 0
         total_files = 0
 
-        # Plain files gathered from directories and/or loose glob matches
+        # Local files gathered from directories and/or loose glob matches
         if fs_files:
-            print(f"Found {len(fs_files)} file(s) to process")
-            batch_processed, batch_errors, batch_skipped = self._run_file_batches(
+            print(f"Found {len(fs_files)} local file(s) to process")
+            bp, be, bs = self._run_file_batches(
                 service, fs_files, self._common_base(fs_files), output, n,
                 generate_ids, consolidate_header, consolidate_citations,
                 include_raw_citations, include_raw_affiliations, tei_coordinates,
                 segment_sentences, force, verbose, flavor, json_output, markdown_output
             )
-            processed_files_count += batch_processed
-            errors_files_count += batch_errors
-            skipped_files_count += batch_skipped
+            processed_files_count += bp
+            errors_files_count += be
+            skipped_files_count += bs
             total_files += len(fs_files)
 
-        # Archives are streamed entry-by-entry, one batch-sized chunk at a time
+        # Loose remote (s3) files: streamed to a temp dir one chunk at a time
+        if remote_files:
+            rt, rp, re_count, rs = self._process_remote_files(
+                service, remote_files, output, n,
+                generate_ids, consolidate_header, consolidate_citations,
+                include_raw_citations, include_raw_affiliations, tei_coordinates,
+                segment_sentences, force, verbose, flavor, json_output, markdown_output
+            )
+            processed_files_count += rp
+            errors_files_count += re_count
+            skipped_files_count += rs
+            total_files += rt
+
+        # Archives (local or s3 zip) are streamed entry-by-entry per chunk
         for archive_path in archive_paths:
-            arc_total, arc_processed, arc_errors, arc_skipped = self._process_archive_core(
+            at, ap, ae, as_count = self._process_archive_core(
                 service, archive_path, output, n,
                 generate_ids, consolidate_header, consolidate_citations,
                 include_raw_citations, include_raw_affiliations, tei_coordinates,
                 segment_sentences, force, verbose, flavor, json_output, markdown_output
             )
-            processed_files_count += arc_processed
-            errors_files_count += arc_errors
-            skipped_files_count += arc_skipped
-            total_files += arc_total
+            processed_files_count += ap
+            errors_files_count += ae
+            skipped_files_count += as_count
+            total_files += at
 
         if total_files == 0:
-            self.logger.warning(f"No eligible files found in input '{input_path}'")
+            self.logger.warning(f"No eligible files found in input(s): {inputs}")
             return
 
         runtime = time.time() - start_time
@@ -467,12 +520,15 @@ class GrobidClient(ApiClient):
         )
 
     def _resolve_input_paths(self, input_path):
-        """Resolve an input path into a sorted list of concrete paths.
+        """Resolve an input into a sorted list of concrete paths.
 
-        Supports shell-style glob patterns (including the recursive ``**``) and
-        ``~`` expansion. A plain path without glob metacharacters is returned
-        as-is (so callers can still handle a missing path themselves).
+        Handles ``s3://`` URIs/prefixes/globs, shell-style glob patterns
+        (including the recursive ``**``) and ``~`` expansion. A plain local path
+        without glob metacharacters is returned as-is (so callers can still
+        handle a missing path themselves).
         """
+        if self._is_s3(input_path):
+            return self._resolve_s3_paths(input_path)
         expanded = os.path.expanduser(input_path)
         if glob.has_magic(expanded):
             return sorted(glob.glob(expanded, recursive=True))
@@ -501,6 +557,84 @@ class GrobidClient(ApiClient):
             # e.g. paths on different drives (Windows); fall back to first parent
             return os.path.dirname(abs_files[0])
         return base if os.path.isdir(base) else os.path.dirname(base)
+
+    # ---- S3 support (optional 's3' extra: smart_open + boto3) ----
+
+    @staticmethod
+    def _is_s3(path):
+        """Return True if path is an s3:// URI."""
+        return isinstance(path, str) and path.startswith("s3://")
+
+    @staticmethod
+    def _split_s3(uri):
+        """Split an s3://bucket/key URI into (bucket, key)."""
+        bucket, _, key = uri[len("s3://"):].partition("/")
+        return bucket, key
+
+    def _s3_basename(self, uri):
+        """Return the last path component of an s3:// key."""
+        return self._split_s3(uri)[1].rsplit("/", 1)[-1]
+
+    def _import_smart_open(self):
+        try:
+            import smart_open  # noqa: F401
+            return smart_open
+        except ImportError as e:
+            raise ImportError(
+                "Reading from s3:// requires the optional 's3' extra. "
+                "Install it with: pip install grobid-client-python[s3]"
+            ) from e
+
+    def _import_boto3(self):
+        try:
+            import boto3  # noqa: F401
+            return boto3
+        except ImportError as e:
+            raise ImportError(
+                "Listing s3:// requires the optional 's3' extra. "
+                "Install it with: pip install grobid-client-python[s3]"
+            ) from e
+
+    def _s3_open(self, uri):
+        """Open an S3 object as a seekable binary stream (HTTP range-streamed).
+
+        The returned stream lets zipfile read only the central directory and the
+        requested entries, so a remote zip is never fully downloaded.
+        """
+        return self._import_smart_open().open(uri, "rb")
+
+    def _resolve_s3_paths(self, uri):
+        """Resolve an s3:// object/prefix/glob into a sorted list of object URIs.
+
+        - ``s3://bucket/path/file.zip``  -> that single object
+        - ``s3://bucket/prefix/``        -> every object under the prefix
+        - ``s3://bucket/prefix/*.zip``   -> objects under the prefix matching the glob
+        """
+        bucket, key = self._split_s3(uri)
+        if not bucket:
+            self.logger.warning(f"Invalid s3 uri: {uri}")
+            return []
+
+        pattern = None
+        if glob.has_magic(key):
+            magic = min(key.find(c) for c in "*?[" if c in key)
+            prefix = key[:magic]
+            pattern = key
+        elif key == "" or key.endswith("/"):
+            prefix = key
+        else:
+            return [uri]  # a concrete object key
+
+        s3 = self._import_boto3().client("s3")
+        keys = []
+        for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                k = obj["Key"]
+                if k.endswith("/"):
+                    continue
+                if pattern is None or fnmatch.fnmatch(k, pattern):
+                    keys.append(k)
+        return [f"s3://{bucket}/{k}" for k in sorted(keys)]
 
     def _print_processing_summary(self, processed, errors, skipped, total, runtime):
         """Print the final processing statistics (shared by all input modes)."""
@@ -593,12 +727,14 @@ class GrobidClient(ApiClient):
             return True
         return False
 
-    def _is_archive(self, path):
-        """Return True if path is an existing zip/tar archive file."""
-        if not os.path.isfile(path):
-            return False
+    def _looks_like_archive(self, path):
+        """Return True if the path/URI name has a known archive extension."""
         lower = path.lower()
         return any(lower.endswith(ext) for ext in self.ARCHIVE_EXTENSIONS)
+
+    def _is_archive(self, path):
+        """Return True if path is an existing local zip/tar archive file."""
+        return os.path.isfile(path) and self._looks_like_archive(path)
 
     def _archive_stem(self, path):
         """Strip a known archive extension from path (e.g. docs.tar.gz -> docs)."""
@@ -625,7 +761,20 @@ class GrobidClient(ApiClient):
         """Open a zip/tar archive and return (kind, handle, member_names).
 
         member_names contains only regular files (directories are skipped).
+        For s3:// zips the archive is range-streamed (not fully downloaded); the
+        underlying stream is stashed on the handle so the caller can close it.
         """
+        if self._is_s3(archive_path):
+            if not archive_path.lower().endswith(".zip"):
+                raise ValueError(
+                    f"Only .zip archives can be range-streamed over s3://: {archive_path}"
+                )
+            stream = self._s3_open(archive_path)
+            archive = zipfile.ZipFile(stream)
+            archive._grobid_stream = stream  # closed by _process_archive_core
+            names = [n for n in archive.namelist() if not n.endswith("/")]
+            return "zip", archive, names
+
         if archive_path.lower().endswith(".zip"):
             archive = zipfile.ZipFile(archive_path)
             names = [n for n in archive.namelist() if not n.endswith("/")]
@@ -736,13 +885,17 @@ class GrobidClient(ApiClient):
         batch_size_pdf = self.config["batch_size"]
 
         # Results must survive the temporary extraction directories, so when no
-        # output is given we default to a directory named after the archive.
+        # output is given we default to a directory named after the archive. For
+        # s3 archives there is no local home, so use the object's basename.
         if output is None:
-            output = self._archive_stem(archive_path)
+            if self._is_s3(archive_path):
+                output = self._archive_stem(self._s3_basename(archive_path))
+            else:
+                output = self._archive_stem(archive_path)
 
         try:
             kind, archive, member_names = self._open_archive(archive_path)
-        except (zipfile.BadZipFile, tarfile.TarError, OSError) as e:
+        except Exception as e:
             self.logger.error(f"Could not open archive {archive_path}: {str(e)}")
             return 0, 0, 0, 0
 
@@ -803,9 +956,99 @@ class GrobidClient(ApiClient):
                 finally:
                     shutil.rmtree(temp_dir, ignore_errors=True)
         finally:
-            archive.close()
+            try:
+                archive.close()
+            finally:
+                # ZipFile does not close a file object we passed in (the s3 stream)
+                stream = getattr(archive, "_grobid_stream", None)
+                if stream is not None:
+                    stream.close()
 
         return total_files, processed_files_count, errors_files_count, skipped_files_count
+
+    def _process_remote_files(
+            self,
+            service,
+            uris,
+            output,
+            n,
+            generate_ids,
+            consolidate_header,
+            consolidate_citations,
+            include_raw_citations,
+            include_raw_affiliations,
+            tei_coordinates,
+            segment_sentences,
+            force,
+            verbose,
+            flavor,
+            json_output,
+            markdown_output
+    ):
+        """Stream loose remote (s3) files to a temp dir in chunks and process them.
+
+        Returns (total, processed, errors, skipped). Objects are fetched a
+        batch at a time and deleted before the next chunk, so disk stays bounded.
+        """
+        total = len(uris)
+        if total == 0:
+            return 0, 0, 0, 0
+        # Remote files have no local home; default output to the current dir.
+        if output is None:
+            output = "."
+
+        batch_size_pdf = self.config["batch_size"]
+        print(f"Found {total} remote file(s) to process")
+        processed_count = 0
+        error_count = 0
+        skipped_count = 0
+
+        for chunk_start in range(0, total, batch_size_pdf):
+            chunk = uris[chunk_start:chunk_start + batch_size_pdf]
+            temp_dir = tempfile.mkdtemp(prefix="grobid_s3_")
+            try:
+                local_files = []
+                for uri in chunk:
+                    if verbose:
+                        self.logger.info(f"Fetching {uri}")
+                    dest = os.path.join(temp_dir, self._s3_basename(uri))
+                    try:
+                        with self._s3_open(uri) as src, open(dest, "wb") as out_file:
+                            shutil.copyfileobj(src, out_file)
+                        local_files.append(dest)
+                    except Exception as e:
+                        self.logger.error(f"Failed to fetch {uri}: {str(e)}")
+                        error_count += 1
+
+                if not local_files:
+                    continue
+
+                batch_processed, batch_errors, batch_skipped = self.process_batch(
+                    service,
+                    local_files,
+                    temp_dir,
+                    output,
+                    n,
+                    generate_ids,
+                    consolidate_header,
+                    consolidate_citations,
+                    include_raw_citations,
+                    include_raw_affiliations,
+                    tei_coordinates,
+                    segment_sentences,
+                    force,
+                    verbose,
+                    flavor,
+                    json_output,
+                    markdown_output
+                )
+                processed_count += batch_processed
+                error_count += batch_errors
+                skipped_count += batch_skipped
+            finally:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+
+        return total, processed_count, error_count, skipped_count
 
     def process_batch(
             self,
@@ -1181,7 +1424,12 @@ def main() -> None:
     parser.add_argument(
         "--input",
         default=None,
-        help="path to the directory - or a .zip/.tar/.tar.gz archive - containing files to process: PDF or .txt (for processCitationList only, one reference per line), or .xml for patents in ST36. Archives are streamed and never fully decompressed."
+        help="input to process: a directory, a file, a .zip/.tar/.tar.gz archive, a glob pattern (e.g. '**/*.pdf', 'paper*.zip'), or an s3:// object/prefix/glob (requires the 's3' extra). Archives are streamed and never fully decompressed."
+    )
+    parser.add_argument(
+        "--input-list",
+        default=None,
+        help="path to a text file with one input per line (local path, glob or s3:// URI); all are processed together. Lines starting with '#' are ignored."
     )
     parser.add_argument(
         "--output",
@@ -1271,6 +1519,7 @@ def main() -> None:
     args = parser.parse_args()
 
     input_path = args.input
+    input_list = args.input_list
     config_path = args.config
     output_path = args.output
     flavor = args.flavor
@@ -1327,12 +1576,31 @@ def main() -> None:
         logger.error(f"Missing or invalid service '{service}', must be one of {valid_services}")
         exit(1)
 
+    # Build the list of inputs from --input and/or --input-list
+    inputs = []
+    if input_path is not None:
+        inputs.append(input_path)
+    if input_list is not None:
+        try:
+            with open(input_list, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        inputs.append(line)
+        except OSError as e:
+            logger.error(f"Could not read --input-list {input_list}: {str(e)}")
+            exit(1)
+
+    if not inputs:
+        logger.error("No input provided (use --input and/or --input-list)")
+        exit(1)
+
     start_time = time.time()
 
     try:
-        client.process(
+        client.process_paths(
             service,
-            input_path,
+            inputs,
             output=output_path,
             n=n,
             generate_ids=generate_ids,

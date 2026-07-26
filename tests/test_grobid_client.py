@@ -244,7 +244,7 @@ class TestGrobidClient:
                     client.process('processFulltextDocument', empty_dir)
 
                     client.logger.warning.assert_called_with(
-                        f"No eligible files found in input '{empty_dir}'")
+                        f"No eligible files found in input(s): ['{empty_dir}']")
 
     @patch('builtins.print')  # Mock print since we use print for statistics
     def test_process_with_pdf_files(self, mock_print):
@@ -268,7 +268,7 @@ class TestGrobidClient:
                         batched = mock_batch.call_args.args[1]
                         assert len(batched) == 2
                         print_calls = [call[0][0] for call in mock_print.call_args_list if 'Found' in call[0][0]]
-                        assert any('Found 2 file(s) to process' in call for call in print_calls)
+                        assert any('Found 2 local file(s) to process' in call for call in print_calls)
 
     @patch('builtins.open', new_callable=mock_open)
     @patch('grobid_client.grobid_client.GrobidClient.post')
