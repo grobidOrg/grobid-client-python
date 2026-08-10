@@ -75,6 +75,13 @@ class GrobidClient(ApiClient):
     # come before their single-dot prefixes when stripping (see _archive_stem).
     ARCHIVE_EXTENSIONS = (".tar.gz", ".tar.bz2", ".tgz", ".tbz2", ".zip", ".tar")
 
+    # Suffix of the TEI result files, and the naming of the error files written
+    # next to them when a document fails (e.g. paper_500.txt). The latter is what
+    # skip_errors looks for to know that a document already failed.
+    # See https://github.com/grobidOrg/grobid-client-python/issues/119
+    TEI_SUFFIX = ".grobid.tei.xml"
+    ERROR_FILE_RE = re.compile(r"_\d{3}\.txt$")
+
     # Default configuration values
     DEFAULT_CONFIG: dict = {
         'grobid_server': 'http://localhost:8070',
@@ -428,6 +435,45 @@ class GrobidClient(ApiClient):
         except OSError:
             pass
 
+    def _error_file_name(self, tei_filename: str, status: int) -> str:
+        """Name of the error file recording a failed processing of a document."""
+        return self._output_stem(tei_filename) + f"_{status}.txt"
+
+    def _output_stem(self, tei_filename: str) -> str:
+        """Strip the TEI suffix from an output file name."""
+        if tei_filename.endswith(self.TEI_SUFFIX):
+            return tei_filename[:-len(self.TEI_SUFFIX)]
+        return tei_filename
+
+    def _find_error_files(self, tei_filename: str) -> list:
+        """Return the error files left by previous failed runs for this output.
+
+        Errors are recorded as ``<stem>_<status>.txt`` next to the TEI file (the
+        status code varies from run to run), so we glob on the stem and keep only
+        the names that actually look like an error marker.
+        """
+        stem = os.path.expanduser(self._output_stem(tei_filename))
+        return [
+            candidate for candidate in sorted(glob.glob(glob.escape(stem) + "_*.txt"))
+            if self.ERROR_FILE_RE.search(os.path.basename(candidate))
+        ]
+
+    def _remove_error_files(self, tei_filename: str, keep: Optional[str] = None) -> None:
+        """Delete stale error markers for an output, optionally keeping one.
+
+        Called after a document has been (re)processed so that a document which
+        now succeeds - or fails with a different status - does not keep dragging
+        along the marker of an older failure.
+        """
+        for error_file in self._find_error_files(tei_filename):
+            if keep is not None and os.path.abspath(error_file) == os.path.abspath(os.path.expanduser(keep)):
+                continue
+            try:
+                os.remove(error_file)
+                self.logger.debug(f"Removed stale error file: {error_file}")
+            except OSError as e:
+                self.logger.warning(f"Could not remove stale error file {error_file}: {str(e)}")
+
     def ping(self) -> Tuple[bool, int]:
         """
         Check the Grobid service. Returns True if the service is up.
@@ -452,7 +498,8 @@ class GrobidClient(ApiClient):
             verbose: bool = False,
             flavor: Optional[str] = None,
             json_output: bool = False,
-            markdown_output: bool = False
+            markdown_output: bool = False,
+            skip_errors: bool = False
     ) -> None:
         if input_path is None:
             self.logger.warning("No input path provided")
@@ -465,6 +512,7 @@ class GrobidClient(ApiClient):
             tei_coordinates=tei_coordinates, segment_sentences=segment_sentences,
             force=force, verbose=verbose, flavor=flavor,
             json_output=json_output, markdown_output=markdown_output,
+            skip_errors=skip_errors,
         )
 
     def process_paths(
@@ -484,7 +532,8 @@ class GrobidClient(ApiClient):
             verbose: bool = False,
             flavor: Optional[str] = None,
             json_output: bool = False,
-            markdown_output: bool = False
+            markdown_output: bool = False,
+            skip_errors: bool = False
     ) -> None:
         """Process a list of inputs.
 
@@ -543,7 +592,8 @@ class GrobidClient(ApiClient):
                 service, fs_files, self._common_base(fs_files), output, n,
                 generate_ids, consolidate_header, consolidate_citations,
                 include_raw_citations, include_raw_affiliations, tei_coordinates,
-                segment_sentences, force, verbose, flavor, json_output, markdown_output
+                segment_sentences, force, verbose, flavor, json_output, markdown_output,
+                skip_errors=skip_errors
             )
             processed_files_count += bp
             errors_files_count += be
@@ -556,7 +606,8 @@ class GrobidClient(ApiClient):
                 service, remote_files, output, n,
                 generate_ids, consolidate_header, consolidate_citations,
                 include_raw_citations, include_raw_affiliations, tei_coordinates,
-                segment_sentences, force, verbose, flavor, json_output, markdown_output
+                segment_sentences, force, verbose, flavor, json_output, markdown_output,
+                skip_errors=skip_errors
             )
             processed_files_count += rp
             errors_files_count += re_count
@@ -569,7 +620,8 @@ class GrobidClient(ApiClient):
                 service, archive_path, output, n,
                 generate_ids, consolidate_header, consolidate_citations,
                 include_raw_citations, include_raw_affiliations, tei_coordinates,
-                segment_sentences, force, verbose, flavor, json_output, markdown_output
+                segment_sentences, force, verbose, flavor, json_output, markdown_output,
+                skip_errors=skip_errors
             )
             processed_files_count += ap
             errors_files_count += ae
@@ -582,7 +634,8 @@ class GrobidClient(ApiClient):
 
         runtime = time.time() - start_time
         self._print_processing_summary(
-            processed_files_count, errors_files_count, skipped_files_count, total_files, runtime
+            processed_files_count, errors_files_count, skipped_files_count, total_files, runtime,
+            skip_errors=skip_errors
         )
 
     def _resolve_input_paths(self, input_path: str) -> list:
@@ -708,7 +761,8 @@ class GrobidClient(ApiClient):
             errors: int,
             skipped: int,
             total: int,
-            runtime: float
+            runtime: float,
+            skip_errors: bool = False
     ) -> None:
         """Print the final processing statistics (shared by all input modes)."""
         docs_per_second = processed / runtime if runtime > 0 else 0
@@ -717,7 +771,8 @@ class GrobidClient(ApiClient):
         print(f"Processing completed: {processed} out of {total} files processed")
         print(f"Errors: {errors} out of {total} files processed")
         if skipped > 0:
-            print(f"Skipped: {skipped} out of {total} files (already existed, use --force to reprocess)")
+            reason = "already existed or previously failed" if skip_errors else "already existed"
+            print(f"Skipped: {skipped} out of {total} files ({reason}, use --force to reprocess)")
 
         print(f"⏱️  Total runtime: {runtime:.2f} seconds")
         print(f"🚀 Speed: {docs_per_second:.2f} documents/second")
@@ -741,7 +796,8 @@ class GrobidClient(ApiClient):
             verbose: bool,
             flavor: Optional[str],
             json_output: bool,
-            markdown_output: bool
+            markdown_output: bool,
+            skip_errors: bool = False
     ) -> Tuple[int, int, int]:
         """Run process_batch over a list of files in chunks of batch_size.
 
@@ -768,7 +824,8 @@ class GrobidClient(ApiClient):
                     service, batch, input_path, output, n, generate_ids,
                     consolidate_header, consolidate_citations, include_raw_citations,
                     include_raw_affiliations, tei_coordinates, segment_sentences,
-                    force, verbose, flavor, json_output, markdown_output
+                    force, verbose, flavor, json_output, markdown_output,
+                    skip_errors=skip_errors
                 )
                 processed_files_count += batch_processed
                 errors_files_count += batch_errors
@@ -780,7 +837,8 @@ class GrobidClient(ApiClient):
                 service, batch, input_path, output, n, generate_ids,
                 consolidate_header, consolidate_citations, include_raw_citations,
                 include_raw_affiliations, tei_coordinates, segment_sentences,
-                force, verbose, flavor, json_output, markdown_output
+                force, verbose, flavor, json_output, markdown_output,
+                skip_errors=skip_errors
             )
             processed_files_count += batch_processed
             errors_files_count += batch_errors
@@ -914,7 +972,8 @@ class GrobidClient(ApiClient):
             verbose: bool = False,
             flavor: Optional[str] = None,
             json_output: bool = False,
-            markdown_output: bool = False
+            markdown_output: bool = False,
+            skip_errors: bool = False
     ) -> None:
         """Process the eligible files contained in a zip/tar archive.
 
@@ -933,14 +992,16 @@ class GrobidClient(ApiClient):
             service, archive_path, output, n, generate_ids, consolidate_header,
             consolidate_citations, include_raw_citations, include_raw_affiliations,
             tei_coordinates, segment_sentences, force, verbose, flavor,
-            json_output, markdown_output
+            json_output, markdown_output, skip_errors=skip_errors
         )
 
         if total_files == 0:
             return
 
         runtime = time.time() - start_time
-        self._print_processing_summary(processed, errors, skipped, total_files, runtime)
+        self._print_processing_summary(
+            processed, errors, skipped, total_files, runtime, skip_errors=skip_errors
+        )
 
     def _process_archive_core(
             self,
@@ -959,7 +1020,8 @@ class GrobidClient(ApiClient):
             verbose: bool,
             flavor: Optional[str],
             json_output: bool,
-            markdown_output: bool
+            markdown_output: bool,
+            skip_errors: bool = False
     ) -> Tuple[int, int, int, int]:
         """Stream and process an archive; return (total, processed, errors, skipped).
 
@@ -1032,7 +1094,8 @@ class GrobidClient(ApiClient):
                         verbose,
                         flavor,
                         json_output,
-                        markdown_output
+                        markdown_output,
+                        skip_errors=skip_errors
                     )
                     processed_files_count += batch_processed
                     errors_files_count += batch_errors
@@ -1067,7 +1130,8 @@ class GrobidClient(ApiClient):
             verbose: bool,
             flavor: Optional[str],
             json_output: bool,
-            markdown_output: bool
+            markdown_output: bool,
+            skip_errors: bool = False
     ) -> Tuple[int, int, int, int]:
         """Stream loose remote (s3) files to a temp dir in chunks and process them.
 
@@ -1124,7 +1188,8 @@ class GrobidClient(ApiClient):
                     verbose,
                     flavor,
                     json_output,
-                    markdown_output
+                    markdown_output,
+                    skip_errors=skip_errors
                 )
                 processed_count += batch_processed
                 error_count += batch_errors
@@ -1152,7 +1217,8 @@ class GrobidClient(ApiClient):
             verbose: bool = False,
             flavor: Optional[str] = None,
             json_output: bool = False,
-            markdown_output: bool = False
+            markdown_output: bool = False,
+            skip_errors: bool = False
     ) -> Tuple[int, int, int]:
         batch_start_time = time.time()
         if verbose:
@@ -1217,6 +1283,18 @@ class GrobidClient(ApiClient):
 
                     continue
 
+                # Documents that already failed are usually going to fail again
+                # as long as nothing changed, so --skip-errors lets a re-run go
+                # straight past them. See issue #119.
+                if not force and skip_errors:
+                    previous_errors = self._find_error_files(filename)
+                    if previous_errors:
+                        self.logger.info(
+                            f"{input_file} previously failed ({os.path.basename(previous_errors[0])}), "
+                            f"skipping... (use --force to retry it)")
+                        skipped_count += 1
+                        continue
+
                 selected_process: Any = self.process_pdf
                 if service == 'processCitationList':
                     selected_process = self.process_txt
@@ -1249,10 +1327,14 @@ class GrobidClient(ApiClient):
                 self.logger.error(f"Processing of {input_file} failed with error {status}: {text}")
                 error_count += 1
                 # writing error file with suffixed error code
+                error_filename = self._error_file_name(filename, status)
                 try:
-                    error_filename = filename.replace(".grobid.tei.xml", f"_{status}.txt")
                     self._write_atomic(error_filename, text if text is not None else "")
                     self.logger.info(f"Error details written to {error_filename}")
+                    # A previous run may have failed with a different status code;
+                    # keep only the marker of this run so the error state of the
+                    # document stays unambiguous (and skippable).
+                    self._remove_error_files(filename, keep=error_filename)
                 except OSError as e:
                     self.logger.error(f"Failed to write error file {filename}: {str(e)}")
             else:
@@ -1261,7 +1343,12 @@ class GrobidClient(ApiClient):
                 try:
                     self._write_atomic(filename, text)
                     self.logger.debug(f"Successfully wrote TEI file: {filename}")
-                    
+
+                    # The document no longer is in error: drop the marker left by
+                    # a previous failed run so it is not skipped by --skip-errors.
+                    self._remove_error_files(filename)
+
+
                     # Convert to JSON if requested
                     if json_output:
                         try:
@@ -1555,6 +1642,12 @@ def main() -> None:
         help="force re-processing pdf input files when tei output files already exist",
     )
     parser.add_argument(
+        "--skip_errors", "--skip-errors",
+        dest="skip_errors",
+        action="store_true",
+        help="skip input files that already failed in a previous run (an error file <name>_<status>.txt exists next to the expected tei output); ignored when --force is used",
+    )
+    parser.add_argument(
         "--tei_coordinates", "--teiCoordinates",
         dest="tei_coordinates",
         action="store_true",
@@ -1645,6 +1738,7 @@ def main() -> None:
     include_raw_citations = args.include_raw_citations
     include_raw_affiliations = args.include_raw_affiliations
     force = args.force
+    skip_errors = args.skip_errors
     tei_coordinates = args.tei_coordinates
     segment_sentences = args.segment_sentences
     verbose = args.verbose
@@ -1691,7 +1785,8 @@ def main() -> None:
             verbose=verbose,
             flavor=flavor,
             json_output=json_output,
-            markdown_output=markdown_output
+            markdown_output=markdown_output,
+            skip_errors=skip_errors
         )
     except Exception as e:
         logger.error(f"Processing failed: {str(e)}")

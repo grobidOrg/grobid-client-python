@@ -1019,3 +1019,148 @@ class TestAtomicWrite:
             dest = os.path.join(d, 'a.grobid.tei.xml')
             client._write_atomic(dest, 'x')
             assert (os.stat(dest).st_mode & 0o777) == (os.stat(reference).st_mode & 0o777)
+
+
+class TestSkipErrors:
+    """Tests for skipping documents that already failed (issue #119)."""
+
+    def _client(self):
+        with patch('grobid_client.grobid_client.GrobidClient._test_server_connection'):
+            with patch('grobid_client.grobid_client.GrobidClient._configure_logging'):
+                client = GrobidClient(check_server=False)
+        client.logger = Mock()
+        client.config['batch_size'] = 50
+        return client
+
+    @staticmethod
+    def _make_pdfs(directory, names):
+        for name in names:
+            with open(os.path.join(directory, name), 'wb') as f:
+                f.write(b'%PDF')
+
+    def _run(self, client, input_dir, output, failing=(), **kwargs):
+        """Process input_dir, making the named PDFs come back with a 500."""
+        def fake_post(url, files=None, data=None, headers=None, timeout=None):
+            resp = Mock()
+            if os.path.basename(files['input'][0]) in failing:
+                resp.text = 'boom'
+                return (resp, 500)
+            resp.text = '<TEI>ok</TEI>'
+            return (resp, 200)
+
+        with patch.object(GrobidClient, 'post', side_effect=fake_post) as mock_post:
+            client.process('processFulltextDocument', input_dir, output=output, **kwargs)
+        return [os.path.basename(c.kwargs['files']['input'][0]) for c in mock_post.call_args_list]
+
+    def test_find_error_files_matches_only_error_markers(self):
+        client = self._client()
+        with tempfile.TemporaryDirectory() as d:
+            tei = os.path.join(d, 'a.grobid.tei.xml')
+            for name in ('a_500.txt', 'a_408.txt', 'a_notes.txt', 'a.txt', 'b_500.txt'):
+                open(os.path.join(d, name), 'w').close()
+            found = [os.path.basename(f) for f in client._find_error_files(tei)]
+            assert found == ['a_408.txt', 'a_500.txt']
+
+    def test_error_file_name(self):
+        client = self._client()
+        assert client._error_file_name('/out/a.grobid.tei.xml', 500) == '/out/a_500.txt'
+
+    def test_skip_errors_skips_previously_failed_document(self):
+        client = self._client()
+        with tempfile.TemporaryDirectory() as d:
+            inp = os.path.join(d, 'in')
+            out = os.path.join(d, 'out')
+            os.makedirs(inp)
+            self._make_pdfs(inp, ['ok.pdf', 'bad.pdf'])
+
+            # first run: bad.pdf fails and leaves bad_500.txt behind
+            self._run(client, inp, out, failing={'bad.pdf'}, force=True)
+            assert os.path.isfile(os.path.join(out, 'ok.grobid.tei.xml'))
+            assert os.path.isfile(os.path.join(out, 'bad_500.txt'))
+
+            # second run without --force: ok.pdf is skipped (tei exists) and
+            # bad.pdf is skipped too because of its error marker
+            sent = self._run(client, inp, out, failing={'bad.pdf'}, force=False, skip_errors=True)
+            assert sent == []
+
+    def test_without_skip_errors_failed_document_is_retried(self):
+        client = self._client()
+        with tempfile.TemporaryDirectory() as d:
+            inp = os.path.join(d, 'in')
+            out = os.path.join(d, 'out')
+            os.makedirs(inp)
+            self._make_pdfs(inp, ['ok.pdf', 'bad.pdf'])
+
+            self._run(client, inp, out, failing={'bad.pdf'}, force=True)
+            # default behaviour is unchanged: only the existing tei is skipped
+            sent = self._run(client, inp, out, failing={'bad.pdf'}, force=False)
+            assert sent == ['bad.pdf']
+
+    def test_force_overrides_skip_errors(self):
+        client = self._client()
+        with tempfile.TemporaryDirectory() as d:
+            inp = os.path.join(d, 'in')
+            out = os.path.join(d, 'out')
+            os.makedirs(inp)
+            self._make_pdfs(inp, ['bad.pdf'])
+
+            self._run(client, inp, out, failing={'bad.pdf'}, force=True)
+            sent = self._run(client, inp, out, failing={'bad.pdf'}, force=True, skip_errors=True)
+            assert sent == ['bad.pdf']
+
+    def test_successful_retry_removes_stale_error_file(self):
+        client = self._client()
+        with tempfile.TemporaryDirectory() as d:
+            inp = os.path.join(d, 'in')
+            out = os.path.join(d, 'out')
+            os.makedirs(inp)
+            self._make_pdfs(inp, ['bad.pdf'])
+
+            self._run(client, inp, out, failing={'bad.pdf'}, force=True)
+            assert os.path.isfile(os.path.join(out, 'bad_500.txt'))
+
+            # now it succeeds: the marker must go, otherwise a later run with
+            # --skip-errors would keep skipping an already processed document
+            self._run(client, inp, out, failing=(), force=True)
+            assert os.path.isfile(os.path.join(out, 'bad.grobid.tei.xml'))
+            assert not os.path.exists(os.path.join(out, 'bad_500.txt'))
+
+    def test_new_error_replaces_marker_of_previous_status(self):
+        client = self._client()
+        with tempfile.TemporaryDirectory() as d:
+            inp = os.path.join(d, 'in')
+            out = os.path.join(d, 'out')
+            os.makedirs(inp)
+            self._make_pdfs(inp, ['bad.pdf'])
+
+            self._run(client, inp, out, failing={'bad.pdf'}, force=True)
+            assert os.path.isfile(os.path.join(out, 'bad_500.txt'))
+
+            def fake_post(url, files=None, data=None, headers=None, timeout=None):
+                resp = Mock()
+                resp.text = 'timeout'
+                return (resp, 408)
+
+            with patch.object(GrobidClient, 'post', side_effect=fake_post):
+                client.process('processFulltextDocument', inp, output=out, force=True)
+
+            assert os.path.isfile(os.path.join(out, 'bad_408.txt'))
+            assert not os.path.exists(os.path.join(out, 'bad_500.txt'))
+
+    def test_skip_errors_counts_as_skipped(self):
+        client = self._client()
+        with tempfile.TemporaryDirectory() as d:
+            inp = os.path.join(d, 'in')
+            out = os.path.join(d, 'out')
+            os.makedirs(inp)
+            self._make_pdfs(inp, ['bad.pdf'])
+            self._run(client, inp, out, failing={'bad.pdf'}, force=True)
+
+            processed, errors, skipped = client.process_batch(
+                'processFulltextDocument', [os.path.join(inp, 'bad.pdf')], inp, out,
+                n=1, generate_ids=False, consolidate_header=False,
+                consolidate_citations=False, include_raw_citations=False,
+                include_raw_affiliations=False, tei_coordinates=False,
+                segment_sentences=False, force=False, skip_errors=True
+            )
+            assert (processed, errors, skipped) == (0, 0, 1)

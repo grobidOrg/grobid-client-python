@@ -126,15 +126,16 @@ grobid_client [OPTIONS] SERVICE
 
 #### Common Options
 
-| Option      | Description              | Default                 |
-|-------------|--------------------------|-------------------------|
-| `--input`   | Input directory path     | Required                |
-| `--output`  | Output directory path    | Same as input           |
-| `--server`  | GROBID server URL        | `http://localhost:8070` |
-| `--n`       | Concurrency level        | 10                      |
-| `--config`  | Config file path         | Optional                |
-| `--force`   | Overwrite existing files | False                   |
-| `--verbose` | Enable verbose logging   | False                   |
+| Option          | Description                                       | Default                 |
+|-----------------|---------------------------------------------------|-------------------------|
+| `--input`       | Input directory path                              | Required                |
+| `--output`      | Output directory path                             | Same as input           |
+| `--server`      | GROBID server URL                                 | `http://localhost:8070` |
+| `--n`           | Concurrency level                                 | 10                      |
+| `--config`      | Config file path                                  | Optional                |
+| `--force`       | Overwrite existing files                          | False                   |
+| `--skip_errors` | Also skip documents that failed in a previous run | False                   |
+| `--verbose`     | Enable verbose logging                            | False                   |
 
 #### Processing Options
 
@@ -173,6 +174,9 @@ grobid_client --server https://grobid.example.com --input ~/citations.txt proces
 # Force reprocessing with sentence segmentation and JSON output
 grobid_client --input ~/docs --force --segment_sentences --json processFulltextDocument
 
+# Resume an interrupted run without retrying the documents that already failed
+grobid_client --input ~/docs --output ~/results --skip_errors processFulltextDocument
+
 # Process PDFs directly from a zip or tar.gz archive (streamed, not fully decompressed)
 grobid_client --input ~/papers.zip --output ~/results processFulltextDocument
 grobid_client --input ~/papers.tar.gz --output ~/results processFulltextDocument
@@ -202,6 +206,14 @@ grobid_client --input "~/data/**/*.pdf"   --output ~/results processFulltextDocu
 >
 > A **manifest of paths** (local, glob or `s3://`, one per line, `#` comments allowed) can be processed together via
 > `--input-list paths.txt` (combinable with `--input`).
+
+> [!NOTE]
+> **Skipping already handled documents.** By default a re-run skips a document only when its TEI output already exists,
+> so documents that failed are sent to GROBID again. Since a failed document generally fails again unless something
+> changed, `--skip_errors` also skips the documents for which a previous run left an error file
+> (`<name>_<status>.txt`, e.g. `paper_500.txt`) next to the expected TEI output. Drop the flag (or use `--force`) to
+> retry them. Error files are kept in sync automatically: the marker is deleted once the document is processed
+> successfully, and replaced when the same document fails again with a different status code.
 
 ### Python Library
 
@@ -257,6 +269,15 @@ client.process(
     input_path="/path/to/pdfs",
     output_path="/path/to/output",
     markdown_output=True
+)
+
+# Re-run without retrying the documents that failed before
+client.process(
+    service="processFulltextDocument",
+    input_path="/path/to/pdfs",
+    output_path="/path/to/output",
+    force=False,
+    skip_errors=True
 )
 
 ```python
