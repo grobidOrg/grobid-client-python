@@ -1,9 +1,12 @@
 """
 Unit tests for the GROBID client main functionality.
 """
+import concurrent.futures
+import io
 import json
 import os
 import tempfile
+import time
 from unittest.mock import Mock, patch, mock_open
 
 import pytest
@@ -1164,3 +1167,299 @@ class TestSkipErrors:
                 segment_sentences=False, force=False, skip_errors=True
             )
             assert (processed, errors, skipped) == (0, 0, 1)
+
+
+class TestInMemoryDocuments:
+    """Processing a PDF that is already in memory, without writing it to disk.
+
+    Callers that get their PDFs from an API, a database or an object store had to
+    write them to a temporary file only so that this client could open it again.
+    See https://github.com/grobidOrg/grobid-client-python/pull/67
+    """
+
+    PDF = b'%PDF-1.4 in memory'
+
+    def _client(self):
+        with patch('grobid_client.grobid_client.GrobidClient._test_server_connection'):
+            with patch('grobid_client.grobid_client.GrobidClient._configure_logging'):
+                client = GrobidClient(check_server=False)
+        client.logger = Mock()
+        return client
+
+    def _post_spy(self, statuses=(200,)):
+        """Mock of post() recording the multipart part of every call.
+
+        The content has to be read inside the call: the handle is closed before
+        process_pdf returns.
+        """
+        sent = []
+        responses = []
+        for status in statuses:
+            response = Mock()
+            response.text = '<TEI>ok</TEI>'
+            responses.append((response, status))
+
+        def post(url=None, files=None, data=None, headers=None, timeout=None):
+            name, handle, content_type, _ = files['input']
+            sent.append({'name': name, 'content': handle.read(), 'type': content_type})
+            return responses[len(sent) - 1]
+
+        return post, sent
+
+    def _named(self, content, name):
+        stream = io.BytesIO(content)
+        stream.name = name
+        return stream
+
+    def test_bytes_are_sent_without_touching_the_filesystem(self):
+        client = self._client()
+        post, sent = self._post_spy()
+
+        with patch('builtins.open', mock_open()) as mock_file:
+            with patch.object(GrobidClient, 'post', side_effect=post):
+                result = client.process_pdf('processFulltextDocument', self.PDF)
+
+        mock_file.assert_not_called()
+        assert sent[0]['content'] == self.PDF
+        assert sent[0]['type'] == 'application/pdf'
+        assert result == (GrobidClient.DEFAULT_IN_MEMORY_NAME, 200, '<TEI>ok</TEI>')
+
+    def test_a_stream_is_named_after_itself(self):
+        """No filename parameter: the document carries its own name."""
+        client = self._client()
+        post, sent = self._post_spy()
+
+        with patch.object(GrobidClient, 'post', side_effect=post):
+            result = client.process_pdf(
+                'processFulltextDocument', self._named(self.PDF, 'paper.pdf'))
+
+        # the name travels with the request and comes back with the result, so a
+        # caller processing many documents can still tell them apart
+        assert sent[0]['name'] == 'paper.pdf'
+        assert sent[0]['content'] == self.PDF
+        assert result[0] == 'paper.pdf'
+
+    def test_unnamed_stream_falls_back_to_the_default_name(self):
+        client = self._client()
+        post, sent = self._post_spy()
+
+        with patch.object(GrobidClient, 'post', side_effect=post):
+            client.process_pdf('processFulltextDocument', io.BytesIO(self.PDF))
+
+        assert sent[0]['name'] == GrobidClient.DEFAULT_IN_MEMORY_NAME
+
+    def test_a_file_descriptor_name_is_not_used_as_a_document_name(self):
+        """open(fd) leaves an int in .name, which is no name at all."""
+        client = self._client()
+        post, sent = self._post_spy()
+
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, 'x.pdf')
+            with open(path, 'wb') as f:
+                f.write(self.PDF)
+            fd = os.open(path, os.O_RDONLY)
+            with os.fdopen(fd, 'rb') as handle:
+                assert handle.name == fd
+                with patch.object(GrobidClient, 'post', side_effect=post):
+                    result = client.process_pdf('processFulltextDocument', handle)
+
+        assert sent[0]['name'] == GrobidClient.DEFAULT_IN_MEMORY_NAME
+        assert result[0] == GrobidClient.DEFAULT_IN_MEMORY_NAME
+
+    def test_retry_after_503_resends_the_whole_document(self):
+        """The stream is consumed by the first request; the retry must not send an empty body."""
+        client = self._client()
+        post, sent = self._post_spy(statuses=(503, 200))
+
+        with patch('time.sleep'):
+            with patch.object(GrobidClient, 'post', side_effect=post):
+                result = client.process_pdf(
+                    'processFulltextDocument', self._named(self.PDF, 'busy.pdf'))
+
+        assert [call['content'] for call in sent] == [self.PDF, self.PDF]
+        assert [call['name'] for call in sent] == ['busy.pdf', 'busy.pdf']
+        assert result == ('busy.pdf', 200, '<TEI>ok</TEI>')
+
+    def test_retry_after_503_reopens_a_file_on_disk(self):
+        client = self._client()
+        post, sent = self._post_spy(statuses=(503, 200))
+
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, 'busy.pdf')
+            with open(path, 'wb') as f:
+                f.write(self.PDF)
+
+            with patch('time.sleep'):
+                with patch.object(GrobidClient, 'post', side_effect=post):
+                    result = client.process_pdf('processFulltextDocument', path)
+
+        assert [call['content'] for call in sent] == [self.PDF, self.PDF]
+        assert result == (path, 200, '<TEI>ok</TEI>')
+
+    def test_defaults_match_the_other_entry_points(self):
+        client = self._client()
+        captured = {}
+
+        def post(url=None, files=None, data=None, headers=None, timeout=None):
+            captured.update(data)
+            response = Mock()
+            response.text = '<TEI>ok</TEI>'
+            return response, 200
+
+        with patch.object(GrobidClient, 'post', side_effect=post):
+            client.process_pdf('processFulltextDocument', self.PDF)
+
+        assert captured == {'consolidateHeader': '1'}
+
+    def test_path_input_is_unchanged(self):
+        """The in-memory path must not alter how a file on disk is processed."""
+        client = self._client()
+        post, sent = self._post_spy()
+
+        with tempfile.TemporaryDirectory() as d:
+            pdf_path = os.path.join(d, 'on_disk.pdf')
+            with open(pdf_path, 'wb') as f:
+                f.write(self.PDF)
+
+            with patch.object(GrobidClient, 'post', side_effect=post):
+                result = client.process_pdf(
+                    'processFulltextDocument', pdf_path,
+                    generate_ids=False, consolidate_header=False,
+                    consolidate_citations=False, include_raw_citations=False,
+                    include_raw_affiliations=False, tei_coordinates=False,
+                    segment_sentences=False)
+
+        assert sent[0]['name'] == pdf_path
+        assert sent[0]['content'] == self.PDF
+        assert result[0] == pdf_path
+
+    def test_unreadable_stream_is_reported_as_a_failed_document(self):
+        client = self._client()
+
+        class Broken:
+            name = 'broken.pdf'
+
+            def read(self):
+                raise IOError('device on fire')
+
+        with patch.object(GrobidClient, 'post') as mock_post:
+            name, status, message = client.process_pdf('processFulltextDocument', Broken())
+
+        mock_post.assert_not_called()
+        assert (name, status) == ('broken.pdf', 400)
+        assert 'device on fire' in message
+
+
+class TestProcessDocuments:
+    """Processing several documents concurrently."""
+
+    def _client(self):
+        with patch('grobid_client.grobid_client.GrobidClient._test_server_connection'):
+            with patch('grobid_client.grobid_client.GrobidClient._configure_logging'):
+                client = GrobidClient(check_server=False)
+        client.logger = Mock()
+        return client
+
+    def _post(self, failing=(), delays=None):
+        """Mock of post() returning the sent content back, optionally slowly."""
+        def post(url=None, files=None, data=None, headers=None, timeout=None):
+            name, handle, _, _ = files['input']
+            if delays and name in delays:
+                time.sleep(delays[name])
+            response = Mock()
+            if name in failing:
+                response.text = 'boom'
+                return response, 500
+            response.text = f'<TEI>{handle.read().decode()}</TEI>'
+            return response, 200
+
+        return post
+
+    def _named(self, content, name):
+        stream = io.BytesIO(content)
+        stream.name = name
+        return stream
+
+    def test_results_keep_the_input_order(self):
+        """The first document is the slowest, so completion order differs from input order."""
+        client = self._client()
+        documents = [self._named(b'A', 'a.pdf'),
+                     self._named(b'B', 'b.pdf'),
+                     self._named(b'C', 'c.pdf')]
+
+        with patch.object(GrobidClient, 'post', side_effect=self._post(delays={'a.pdf': 0.2})):
+            results = client.process_documents('processFulltextDocument', documents, n=3)
+
+        assert [name for name, _, _ in results] == ['a.pdf', 'b.pdf', 'c.pdf']
+        assert [tei for _, _, tei in results] == ['<TEI>A</TEI>', '<TEI>B</TEI>', '<TEI>C</TEI>']
+
+    def test_bare_contents_are_named_by_position(self):
+        client = self._client()
+
+        with patch.object(GrobidClient, 'post', side_effect=self._post()):
+            results = client.process_documents('processFulltextDocument', [b'first', b'second'])
+
+        # names have to stay unique, otherwise results cannot be told apart
+        assert [name for name, _, _ in results] == ['document-1.pdf', 'document-2.pdf']
+
+    def test_named_and_unnamed_documents_can_be_mixed(self):
+        client = self._client()
+        documents = [self._named(b'A', 'named.pdf'), b'bare', 'on/disk.pdf']
+
+        with patch('builtins.open', mock_open(read_data=b'D')):
+            with patch.object(GrobidClient, 'post', side_effect=self._post()):
+                results = client.process_documents('processFulltextDocument', documents)
+
+        assert [name for name, _, _ in results] == ['named.pdf', 'document-2.pdf', 'on/disk.pdf']
+
+    def test_one_failure_does_not_stop_the_others(self):
+        client = self._client()
+        documents = [self._named(b'OK', 'ok.pdf'),
+                     self._named(b'BAD', 'bad.pdf'),
+                     self._named(b'OK2', 'ok2.pdf')]
+
+        with patch.object(GrobidClient, 'post', side_effect=self._post(failing={'bad.pdf'})):
+            results = client.process_documents('processFulltextDocument', documents)
+
+        assert [status for _, status, _ in results] == [200, 500, 200]
+        assert results[1] == ('bad.pdf', 500, 'boom')
+
+    def test_concurrency_is_bounded_by_n(self):
+        client = self._client()
+        captured = {}
+        real_executor = concurrent.futures.ThreadPoolExecutor
+
+        def executor(max_workers=None, **kwargs):
+            captured['max_workers'] = max_workers
+            return real_executor(max_workers=max_workers, **kwargs)
+
+        with patch('concurrent.futures.ThreadPoolExecutor', side_effect=executor):
+            with patch.object(GrobidClient, 'post', side_effect=self._post()):
+                client.process_documents('processFulltextDocument', [b'a', b'b'], n=4)
+
+        assert captured['max_workers'] == 4
+
+    def test_zero_workers_still_runs(self):
+        """max_workers=0 would make ThreadPoolExecutor raise."""
+        client = self._client()
+
+        with patch.object(GrobidClient, 'post', side_effect=self._post()):
+            results = client.process_documents('processFulltextDocument', [b'a'], n=0)
+
+        assert [status for _, status, _ in results] == [200]
+
+    def test_empty_input_returns_no_results(self):
+        client = self._client()
+
+        with patch.object(GrobidClient, 'post') as mock_post:
+            assert client.process_documents('processFulltextDocument', []) == []
+
+        mock_post.assert_not_called()
+        client.logger.warning.assert_called()
+
+    def test_a_single_pdf_is_rejected(self):
+        """Iterating one PDF would send each of its bytes as a document."""
+        client = self._client()
+
+        with pytest.raises(TypeError, match='process_pdf'):
+            client.process_documents('processFulltextDocument', b'%PDF-1.4 single')

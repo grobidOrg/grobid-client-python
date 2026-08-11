@@ -36,6 +36,7 @@ concurrent processing capabilities for PDF documents, reference strings, and pat
 - **Type Hints**: Ships inline type annotations and a `py.typed` marker (PEP 561) for static type checking
 - **Archive Streaming**: Process files directly from `.zip`/`.tar`/`.tar.gz` archives without fully decompressing them
 - **S3 Streaming**: Read PDFs and zips straight from `s3://` (range-streamed, no full download) with the optional `[s3]` extra
+- **In-Memory Documents**: Send PDFs held as bytes straight to GROBID, without writing them to disk first
 
 ## 📋 Prerequisites
 
@@ -288,6 +289,58 @@ client.process(
     output_path="/path/to/output"
 )
 ```
+
+#### Processing a PDF from memory
+
+A PDF that is already in memory - downloaded from an API, read from a database or an object store - can be sent
+directly, without writing it to a temporary file first. `process_pdf` takes either a path or the document itself, as
+`bytes` or as any binary stream, and returns the TEI as a string:
+
+```python
+import io
+import requests
+
+pdf = io.BytesIO(requests.get("https://example.org/paper.pdf").content)
+pdf.name = "paper.pdf"          # optional, see below
+
+name, status, tei = client.process_pdf(
+    service="processFulltextDocument",
+    pdf_file=pdf,
+    consolidate_header=True,
+    tei_coordinates=True
+)
+
+if status == 200:
+    print(tei)
+```
+
+There is no flag to say where the document comes from: the object itself says it. A document also carries its own name,
+taken from the `name` attribute that `open()` sets on files and that can be set on anything else, `io.BytesIO` included.
+The name identifies the document in the request sent to GROBID, in the logs, and as the first element of the result, so
+documents processed this way stay distinguishable. Bytes passed on their own have nothing to be named after and fall
+back to `document.pdf`.
+
+Several documents can be sent concurrently with `process_documents`, which runs them through the same thread pool the
+file-based processing uses:
+
+```python
+results = client.process_documents(
+    service="processFulltextDocument",
+    documents=[pdf1, pdf2, "/path/to/paper3.pdf"],
+    n=10                            # documents sent concurrently
+)
+
+for name, status, tei in results:
+    ...
+```
+
+Documents that do not name themselves are named `document-1.pdf`, `document-2.pdf`, ... after their position. Results
+come back **in the order the documents were given**, not in completion order, so they can be zipped back onto whatever
+the caller has them keyed by. A document that fails does not stop the others: its own entry carries the error status.
+
+> [!NOTE]
+> Both return the TEI instead of writing it to disk, so the caller decides what to do with it. Use `process()` for the
+> directory-oriented processing with resume and JSON/Markdown conversion.
 
 ### Standalone Conversion Tools
 

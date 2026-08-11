@@ -17,6 +17,7 @@ which is not implemented for the moment.
 from __future__ import annotations
 
 import os
+import io
 import json
 import argparse
 import fnmatch
@@ -32,7 +33,7 @@ import shutil
 import tarfile
 import tempfile
 import zipfile
-from typing import Any, BinaryIO, Optional, Tuple, Union
+from typing import Any, BinaryIO, Callable, Optional, Tuple, Union
 import copy
 
 from .format.TEI2LossyJSON import TEI2LossyJSONConverter
@@ -81,6 +82,11 @@ class GrobidClient(ApiClient):
     # See https://github.com/grobidOrg/grobid-client-python/issues/119
     TEI_SUFFIX = ".grobid.tei.xml"
     ERROR_FILE_RE = re.compile(r"_\d{3}\.txt$")
+
+    # Name given to a PDF that is passed as bytes and left unnamed by the caller.
+    # A multipart part needs a filename, and GROBID echoes it in its own logs and
+    # error messages, so an anonymous document should still be recognisable.
+    DEFAULT_IN_MEMORY_NAME = "document.pdf"
 
     # Default configuration values
     DEFAULT_CONFIG: dict = {
@@ -1404,7 +1410,75 @@ class GrobidClient(ApiClient):
     def process_pdf(
             self,
             service: str,
-            pdf_file: str,
+            pdf_file: Union[str, bytes, bytearray, memoryview, BinaryIO],
+            generate_ids: bool = False,
+            consolidate_header: bool = True,
+            consolidate_citations: bool = False,
+            include_raw_citations: bool = False,
+            include_raw_affiliations: bool = False,
+            tei_coordinates: bool = False,
+            segment_sentences: bool = False,
+            flavor: Optional[str] = None,
+            start: int = -1,
+            end: int = -1
+    ) -> Tuple[str, int, Optional[str]]:
+        """Send a single PDF to GROBID.
+
+        ``pdf_file`` is either a path to read from disk, or the document itself
+        already in memory - bytes, or any binary stream - for callers that got
+        the PDF from somewhere else than the filesystem: a database, an HTTP
+        response, an object store. They would otherwise have to write it out just
+        to have this client read it back.
+        See https://github.com/grobidOrg/grobid-client-python/pull/67
+
+        The document names itself: a path is its own name, and a stream is named
+        after its ``name`` attribute, which ``open()`` sets and which can be set
+        on anything else, ``io.BytesIO`` included:
+
+            pdf = io.BytesIO(downloaded_bytes)
+            pdf.name = "paper.pdf"
+
+        Bytes without a stream around them have nothing to be named after, so
+        they fall back to ``DEFAULT_IN_MEMORY_NAME``.
+
+        Returns:
+            tuple: (document name, status code, response text)
+        """
+        return self._process_named_pdf(
+            service, self._document_name(pdf_file), pdf_file, generate_ids,
+            consolidate_header, consolidate_citations, include_raw_citations,
+            include_raw_affiliations, tei_coordinates, segment_sentences,
+            flavor, start, end
+        )
+
+    def _document_name(self, pdf_file: Any) -> str:
+        """Name a document after itself: its path, or its stream's name."""
+        if isinstance(pdf_file, str):
+            return pdf_file
+        name = getattr(pdf_file, "name", None)
+        # A file opened from a descriptor has an int here, not a name
+        return name if isinstance(name, str) else self.DEFAULT_IN_MEMORY_NAME
+
+    def _pdf_opener(self, pdf_file: Any) -> Callable[[], BinaryIO]:
+        """Return a callable handing out a fresh stream over the document.
+
+        Not a stream but a way to get one: a 503 makes us send the same document
+        again, and a stream that has already been posted is sitting at its end.
+        Rewinding is not enough either - the caller's stream may not be seekable
+        - so a stream is read once, here, and re-served from memory afterwards.
+        """
+        if isinstance(pdf_file, str):
+            return lambda: open(pdf_file, "rb")
+        if isinstance(pdf_file, (bytes, bytearray, memoryview)):
+            return lambda: io.BytesIO(pdf_file)
+        content = pdf_file.read()
+        return lambda: io.BytesIO(content)
+
+    def _process_named_pdf(
+            self,
+            service: str,
+            name: str,
+            pdf_file: Any,
             generate_ids: bool,
             consolidate_header: bool,
             consolidate_citations: bool,
@@ -1416,13 +1490,43 @@ class GrobidClient(ApiClient):
             start: int = -1,
             end: int = -1
     ) -> Tuple[str, int, Optional[str]]:
-        pdf_handle = None
+        """Process a document under a name already decided by the caller."""
         try:
-            pdf_handle = open(pdf_file, "rb")
-            
+            open_handle = self._pdf_opener(pdf_file)
+        except Exception as e:
+            self.logger.error(f"Failed to read PDF {name}: {str(e)}")
+            return (name, 400, f"Failed to open file: {str(e)}")
+
+        return self._send_pdf(
+            service, name, open_handle, generate_ids, consolidate_header,
+            consolidate_citations, include_raw_citations, include_raw_affiliations,
+            tei_coordinates, segment_sentences, flavor, start, end
+        )
+
+    def _send_pdf(
+            self,
+            service: str,
+            name: str,
+            open_handle: Callable[[], BinaryIO],
+            generate_ids: bool,
+            consolidate_header: bool,
+            consolidate_citations: bool,
+            include_raw_citations: bool,
+            include_raw_affiliations: bool,
+            tei_coordinates: bool,
+            segment_sentences: bool,
+            flavor: Optional[str] = None,
+            start: int = -1,
+            end: int = -1
+    ) -> Tuple[str, int, Optional[str]]:
+        """Post one document, retrying it from a fresh stream on a 503."""
+        pdf_handle: Optional[BinaryIO] = None
+        try:
+            pdf_handle = open_handle()
+
             files = {
                 "input": (
-                    pdf_file,
+                    name,
                     pdf_handle,
                     "application/pdf",
                     {"Expires": "0"},
@@ -1461,10 +1565,11 @@ class GrobidClient(ApiClient):
 
             if status == 503:
                 return self._handle_server_busy_retry(
-                    pdf_file,
-                    self.process_pdf,
+                    name,
+                    self._send_pdf,
                     service,
-                    pdf_file,
+                    name,
+                    open_handle,
                     generate_ids,
                     consolidate_header,
                     consolidate_citations,
@@ -1477,21 +1582,113 @@ class GrobidClient(ApiClient):
                     end
                 )
 
-            return (pdf_file, status, res.text)
-        
+            return (name, status, res.text)
+
         except IOError as e:
-            self.logger.error(f"Failed to open PDF file {pdf_file}: {str(e)}")
-            return (pdf_file, 400, f"Failed to open file: {str(e)}")
+            self.logger.error(f"Failed to open PDF file {name}: {str(e)}")
+            return (name, 400, f"Failed to open file: {str(e)}")
         except requests.exceptions.ReadTimeout as e:
-            self.logger.error(f"Request timeout for {pdf_file}: {str(e)}")
-            return (pdf_file, 408, f"Request timeout: {str(e)}")
+            self.logger.error(f"Request timeout for {name}: {str(e)}")
+            return (name, 408, f"Request timeout: {str(e)}")
         except requests.exceptions.RequestException as e:
-            return self._handle_request_error(pdf_file, e)
+            return self._handle_request_error(name, e)
         except Exception as e:
-            return self._handle_unexpected_error(pdf_file, e)
+            return self._handle_unexpected_error(name, e)
         finally:
+            # Always ours to close: the caller's own stream is never kept, only
+            # the bytes read out of it.
             if pdf_handle:
                 pdf_handle.close()
+
+    def process_documents(
+            self,
+            service: str,
+            documents: Any,
+            n: int = 10,
+            generate_ids: bool = False,
+            consolidate_header: bool = True,
+            consolidate_citations: bool = False,
+            include_raw_citations: bool = False,
+            include_raw_affiliations: bool = False,
+            tei_coordinates: bool = False,
+            segment_sentences: bool = False,
+            flavor: Optional[str] = None,
+            verbose: bool = False
+    ) -> list:
+        """Process several documents concurrently and return their results.
+
+        ``process_pdf`` handles one document per call, so a caller holding a list
+        of PDFs would have to build its own thread pool to get any concurrency
+        out of the server. This runs them through the same ThreadPoolExecutor the
+        file-based processing uses, but writes nothing: use ``process()`` for the
+        directory-oriented processing that produces TEI files on disk.
+
+        Each document is whatever ``process_pdf`` accepts - a path, bytes, or a
+        stream - and names itself the same way. Unnamed documents (bare bytes)
+        are named after their position, so that every result stays identifiable.
+
+        Returns:
+            list: one ``(name, status code, response text)`` per document, in the
+            order the documents were given - not in completion order, so results
+            can be zipped back onto whatever the caller has them keyed by.
+            A document that fails does not stop the others: its own entry carries
+            the error status, as with the file-based processing.
+        """
+        items = self._name_documents(documents)
+        if not items:
+            self.logger.warning("No documents to process")
+            return []
+
+        if verbose:
+            self.logger.info(f"{len(items)} document(s) to process")
+
+        # A pool of one is still a pool: n < 1 would make ThreadPoolExecutor raise
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, n)) as executor:
+            futures = [
+                executor.submit(
+                    self._process_named_pdf,
+                    service,
+                    name,
+                    document,
+                    generate_ids,
+                    consolidate_header,
+                    consolidate_citations,
+                    include_raw_citations,
+                    include_raw_affiliations,
+                    tei_coordinates,
+                    segment_sentences,
+                    flavor
+                )
+                for name, document in items
+            ]
+            # Collected in submission order rather than with as_completed():
+            # in-memory documents have no filenames to be matched back on later.
+            return [future.result() for future in futures]
+
+    def _name_documents(self, documents: Any) -> list:
+        """Pair every document with the name it will be known by.
+
+        Documents that name themselves (a path, a stream with a ``name``) keep
+        their own; the rest are numbered after their position, because a batch of
+        documents all called ``document.pdf`` could not be told apart in the
+        results or in GROBID's logs.
+        """
+        if isinstance(documents, (bytes, bytearray, memoryview)):
+            # Iterating a single PDF would yield its individual bytes, so catch
+            # the mistake here rather than sending thousands of empty documents.
+            raise TypeError(
+                "process_documents expects several documents; "
+                "use process_pdf for a single one"
+            )
+
+        items = []
+        stem, extension = os.path.splitext(self.DEFAULT_IN_MEMORY_NAME)
+        for position, document in enumerate(documents, start=1):
+            name = self._document_name(document)
+            if name == self.DEFAULT_IN_MEMORY_NAME:
+                name = f"{stem}-{position}{extension}"
+            items.append((name, document))
+        return items
 
     def get_server_url(self, service: str) -> str:
         return self.config['grobid_server'] + "/api/" + service
