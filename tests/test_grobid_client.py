@@ -893,3 +893,129 @@ class TestGlobInput:
             base = client._common_base([f1, f2])
             assert os.path.isdir(base)
             assert f1.startswith(base) and f2.startswith(base)
+
+
+class TestAtomicWrite:
+    """A killed task must never leave a partial output that resume accepts.
+
+    process_batch decides a document is done with os.path.isfile() alone, so a
+    TEI truncated by an OOM kill is skipped forever on subsequent runs. These
+    tests pin the two properties that prevent it: a completed write is whole,
+    and a failed write leaves nothing behind at all.
+    """
+
+    def _client(self):
+        with patch('grobid_client.grobid_client.GrobidClient._test_server_connection'):
+            with patch('grobid_client.grobid_client.GrobidClient._configure_logging'):
+                client = GrobidClient(check_server=False)
+        client.logger = Mock()
+        return client
+
+    @staticmethod
+    def _leftovers(directory):
+        """Temp files the writer may have leaked (they are dot-prefixed)."""
+        return [n for n in os.listdir(directory) if n.startswith('.') and n.endswith('.tmp')]
+
+    def test_write_lands_content(self):
+        client = self._client()
+        with tempfile.TemporaryDirectory() as d:
+            dest = os.path.join(d, 'a.grobid.tei.xml')
+            client._write_atomic(dest, '<TEI>content</TEI>')
+            with open(dest, encoding='utf8') as fh:
+                assert fh.read() == '<TEI>content</TEI>'
+            assert self._leftovers(d) == []
+
+    def test_write_creates_missing_parents(self):
+        client = self._client()
+        with tempfile.TemporaryDirectory() as d:
+            dest = os.path.join(d, 'sub', 'dir', 'a.grobid.tei.xml')
+            client._write_atomic(dest, 'x')
+            assert os.path.isfile(dest)
+
+    def test_write_overwrites_existing(self):
+        client = self._client()
+        with tempfile.TemporaryDirectory() as d:
+            dest = os.path.join(d, 'a.grobid.tei.xml')
+            client._write_atomic(dest, 'old and much longer')
+            client._write_atomic(dest, 'new')
+            with open(dest, encoding='utf8') as fh:
+                assert fh.read() == 'new'
+
+    def test_failed_write_leaves_no_destination(self):
+        """The whole point: a write that dies part-way must not create the output.
+
+        Simulates the real failure -- some bytes reach the disk, then the
+        process dies -- by writing a prefix and raising, as an OOM kill would.
+        """
+        client = self._client()
+        real_fdopen = os.fdopen
+
+        class PartialWriter:
+            def __init__(self, handle):
+                self._handle = handle
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                self._handle.close()
+                return False
+
+            def write(self, text):
+                self._handle.write(text[:4])       # bytes hit the disk...
+                raise RuntimeError('killed mid-write')   # ...then the task dies
+
+        with tempfile.TemporaryDirectory() as d:
+            dest = os.path.join(d, 'a.grobid.tei.xml')
+            with patch('os.fdopen', lambda fd, *a, **kw: PartialWriter(real_fdopen(fd, *a, **kw))):
+                with pytest.raises(RuntimeError):
+                    client._write_atomic(dest, '<TEI>content</TEI>')
+
+            assert not os.path.exists(dest), \
+                "a partial write created the destination -- resume would skip it forever"
+            assert self._leftovers(d) == [], "temp file was left behind"
+
+    def test_failed_write_preserves_previous_content(self):
+        client = self._client()
+        with tempfile.TemporaryDirectory() as d:
+            dest = os.path.join(d, 'a.grobid.tei.xml')
+            client._write_atomic(dest, 'good')
+            with patch('os.replace', side_effect=OSError('boom')):
+                with pytest.raises(OSError):
+                    client._write_atomic(dest, 'bad')
+            with open(dest, encoding='utf8') as fh:
+                assert fh.read() == 'good'
+            assert self._leftovers(d) == []
+
+    def test_temp_name_is_not_counted_as_output(self):
+        """grobid_stream.sh counts *.grobid.tei.xml and *_[0-9]*.txt via find.
+
+        An in-flight temp file must match neither, or the tallies move while a
+        write is happening.
+        """
+        import fnmatch
+        client = self._client()
+        seen = {}
+        real_mkstemp = tempfile.mkstemp
+
+        def spy(*args, **kwargs):
+            fd, path = real_mkstemp(*args, **kwargs)
+            seen['name'] = os.path.basename(path)
+            return fd, path
+
+        with tempfile.TemporaryDirectory() as d:
+            with patch('tempfile.mkstemp', side_effect=spy):
+                client._write_atomic(os.path.join(d, 'a.grobid.tei.xml'), 'x')
+        assert not fnmatch.fnmatch(seen['name'], '*.grobid.tei.xml')
+        assert not fnmatch.fnmatch(seen['name'], '*_[0-9]*.txt')
+
+    def test_write_uses_normal_permissions(self):
+        """mkstemp creates 0600; TEIs on shared scratch must stay group-readable."""
+        client = self._client()
+        with tempfile.TemporaryDirectory() as d:
+            reference = os.path.join(d, 'reference.txt')
+            with open(reference, 'w') as fh:      # what the old code produced
+                fh.write('x')
+            dest = os.path.join(d, 'a.grobid.tei.xml')
+            client._write_atomic(dest, 'x')
+            assert (os.stat(dest).st_mode & 0o777) == (os.stat(reference).st_mode & 0o777)
