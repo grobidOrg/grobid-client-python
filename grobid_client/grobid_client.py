@@ -32,14 +32,14 @@ import shutil
 import tarfile
 import tempfile
 import zipfile
-from typing import Any, Optional, Tuple, Union
+from typing import Any, BinaryIO, Optional, Tuple, Union
 import copy
 
 from .format.TEI2LossyJSON import TEI2LossyJSONConverter
 from .client import ApiClient
 
 
-def _default_file_mode():
+def _default_file_mode() -> int:
     """The mode open(..., 'w') would have produced, i.e. 0666 minus the umask.
 
     tempfile.mkstemp hardcodes 0600, so files written through it and renamed
@@ -379,7 +379,7 @@ class GrobidClient(ApiClient):
 
         return str(filename)
 
-    def _write_atomic(self, filename, text):
+    def _write_atomic(self, filename: str, text: str) -> None:
         """Write text to filename via a temp file in the same directory, then os.replace.
 
         A killed process must never leave a partial output behind. process_batch
@@ -422,7 +422,7 @@ class GrobidClient(ApiClient):
             raise
 
     @staticmethod
-    def _unlink_quietly(path):
+    def _unlink_quietly(path: str) -> None:
         try:
             os.unlink(path)
         except OSError:
@@ -469,23 +469,23 @@ class GrobidClient(ApiClient):
 
     def process_paths(
             self,
-            service,
-            inputs,
-            output=None,
-            n=10,
-            generate_ids=False,
-            consolidate_header=True,
-            consolidate_citations=False,
-            include_raw_citations=False,
-            include_raw_affiliations=False,
-            tei_coordinates=False,
-            segment_sentences=False,
-            force=True,
-            verbose=False,
-            flavor=None,
-            json_output=False,
-            markdown_output=False
-    ):
+            service: str,
+            inputs: list,
+            output: Optional[str] = None,
+            n: int = 10,
+            generate_ids: bool = False,
+            consolidate_header: bool = True,
+            consolidate_citations: bool = False,
+            include_raw_citations: bool = False,
+            include_raw_affiliations: bool = False,
+            tei_coordinates: bool = False,
+            segment_sentences: bool = False,
+            force: bool = True,
+            verbose: bool = False,
+            flavor: Optional[str] = None,
+            json_output: bool = False,
+            markdown_output: bool = False
+    ) -> None:
         """Process a list of inputs.
 
         Each input may be a local path, a shell glob (``**/*.pdf``), a directory,
@@ -585,7 +585,7 @@ class GrobidClient(ApiClient):
             processed_files_count, errors_files_count, skipped_files_count, total_files, runtime
         )
 
-    def _resolve_input_paths(self, input_path):
+    def _resolve_input_paths(self, input_path: str) -> list:
         """Resolve an input into a sorted list of concrete paths.
 
         Handles ``s3://`` URIs/prefixes/globs, shell-style glob patterns
@@ -600,7 +600,7 @@ class GrobidClient(ApiClient):
             return sorted(glob.glob(expanded, recursive=True))
         return [expanded]
 
-    def _collect_directory_files(self, directory, service):
+    def _collect_directory_files(self, directory: str, service: str) -> list:
         """Recursively collect eligible input files from a directory."""
         files = []
         for path in sorted(pathlib.Path(directory).rglob('*')):
@@ -608,7 +608,7 @@ class GrobidClient(ApiClient):
                 files.append(str(path))
         return files
 
-    def _common_base(self, files):
+    def _common_base(self, files: list) -> str:
         """Return a directory that is an ancestor of all given files.
 
         Used as ``input_path`` for output-name computation; only needs to be a
@@ -627,21 +627,21 @@ class GrobidClient(ApiClient):
     # ---- S3 support (optional 's3' extra: smart_open + boto3) ----
 
     @staticmethod
-    def _is_s3(path):
+    def _is_s3(path: Any) -> bool:
         """Return True if path is an s3:// URI."""
         return isinstance(path, str) and path.startswith("s3://")
 
     @staticmethod
-    def _split_s3(uri):
+    def _split_s3(uri: str) -> Tuple[str, str]:
         """Split an s3://bucket/key URI into (bucket, key)."""
         bucket, _, key = uri[len("s3://"):].partition("/")
         return bucket, key
 
-    def _s3_basename(self, uri):
+    def _s3_basename(self, uri: str) -> str:
         """Return the last path component of an s3:// key."""
         return self._split_s3(uri)[1].rsplit("/", 1)[-1]
 
-    def _import_smart_open(self):
+    def _import_smart_open(self) -> Any:
         try:
             import smart_open  # noqa: F401
             return smart_open
@@ -651,7 +651,7 @@ class GrobidClient(ApiClient):
                 "Install it with: pip install grobid-client-python[s3]"
             ) from e
 
-    def _import_boto3(self):
+    def _import_boto3(self) -> Any:
         try:
             import boto3  # noqa: F401
             return boto3
@@ -661,7 +661,7 @@ class GrobidClient(ApiClient):
                 "Install it with: pip install grobid-client-python[s3]"
             ) from e
 
-    def _s3_open(self, uri):
+    def _s3_open(self, uri: str) -> BinaryIO:
         """Open an S3 object as a seekable binary stream (HTTP range-streamed).
 
         The returned stream lets zipfile read only the central directory and the
@@ -669,7 +669,7 @@ class GrobidClient(ApiClient):
         """
         return self._import_smart_open().open(uri, "rb")
 
-    def _resolve_s3_paths(self, uri):
+    def _resolve_s3_paths(self, uri: str) -> list:
         """Resolve an s3:// object/prefix/glob into a sorted list of object URIs.
 
         - ``s3://bucket/path/file.zip``  -> that single object
@@ -702,7 +702,14 @@ class GrobidClient(ApiClient):
                     keys.append(k)
         return [f"s3://{bucket}/{k}" for k in sorted(keys)]
 
-    def _print_processing_summary(self, processed, errors, skipped, total, runtime):
+    def _print_processing_summary(
+            self,
+            processed: int,
+            errors: int,
+            skipped: int,
+            total: int,
+            runtime: float
+    ) -> None:
         """Print the final processing statistics (shared by all input modes)."""
         docs_per_second = processed / runtime if runtime > 0 else 0
         seconds_per_doc = runtime / processed if processed > 0 else 0
@@ -718,24 +725,24 @@ class GrobidClient(ApiClient):
 
     def _run_file_batches(
             self,
-            service,
-            input_files,
-            input_path,
-            output,
-            n,
-            generate_ids,
-            consolidate_header,
-            consolidate_citations,
-            include_raw_citations,
-            include_raw_affiliations,
-            tei_coordinates,
-            segment_sentences,
-            force,
-            verbose,
-            flavor,
-            json_output,
-            markdown_output
-    ):
+            service: str,
+            input_files: list,
+            input_path: str,
+            output: Optional[str],
+            n: int,
+            generate_ids: bool,
+            consolidate_header: bool,
+            consolidate_citations: bool,
+            include_raw_citations: bool,
+            include_raw_affiliations: bool,
+            tei_coordinates: bool,
+            segment_sentences: bool,
+            force: bool,
+            verbose: bool,
+            flavor: Optional[str],
+            json_output: bool,
+            markdown_output: bool
+    ) -> Tuple[int, int, int]:
         """Run process_batch over a list of files in chunks of batch_size.
 
         Returns the aggregated (processed, errors, skipped) counts.
@@ -781,7 +788,7 @@ class GrobidClient(ApiClient):
 
         return processed_files_count, errors_files_count, skipped_files_count
 
-    def _is_eligible_input(self, filename, service):
+    def _is_eligible_input(self, filename: str, service: str) -> bool:
         """Return True if a file name is a valid input for the given service."""
         if filename.endswith(".pdf") or filename.endswith(".PDF"):
             return True
@@ -793,16 +800,16 @@ class GrobidClient(ApiClient):
             return True
         return False
 
-    def _looks_like_archive(self, path):
+    def _looks_like_archive(self, path: str) -> bool:
         """Return True if the path/URI name has a known archive extension."""
         lower = path.lower()
         return any(lower.endswith(ext) for ext in self.ARCHIVE_EXTENSIONS)
 
-    def _is_archive(self, path):
+    def _is_archive(self, path: str) -> bool:
         """Return True if path is an existing local zip/tar archive file."""
         return os.path.isfile(path) and self._looks_like_archive(path)
 
-    def _archive_stem(self, path):
+    def _archive_stem(self, path: str) -> str:
         """Strip a known archive extension from path (e.g. docs.tar.gz -> docs)."""
         lower = path.lower()
         for ext in self.ARCHIVE_EXTENSIONS:
@@ -810,7 +817,7 @@ class GrobidClient(ApiClient):
                 return path[:-len(ext)]
         return os.path.splitext(path)[0]
 
-    def _safe_member_path(self, dest_dir, arcname):
+    def _safe_member_path(self, dest_dir: str, arcname: str) -> Optional[str]:
         """Resolve an archive entry name to a safe path under dest_dir.
 
         Leading slashes, drive letters and '..' components are stripped to
@@ -823,13 +830,18 @@ class GrobidClient(ApiClient):
             return None
         return os.path.join(dest_dir, *parts)
 
-    def _open_archive(self, archive_path):
+    def _open_archive(self, archive_path: str) -> Tuple[str, Any, list]:
         """Open a zip/tar archive and return (kind, handle, member_names).
 
         member_names contains only regular files (directories are skipped).
         For s3:// zips the archive is range-streamed (not fully downloaded); the
         underlying stream is stashed on the handle so the caller can close it.
+
+        The handle is a ZipFile or a TarFile, which share no common interface
+        here: which one it is, is what the returned "kind" tag is for, and it is
+        the tag - not the type - that the callers dispatch on.
         """
+        archive: Any
         if self._is_s3(archive_path):
             if not archive_path.lower().endswith(".zip"):
                 raise ValueError(
@@ -850,7 +862,13 @@ class GrobidClient(ApiClient):
         names = [m.name for m in archive.getmembers() if m.isfile()]
         return "tar", archive, names
 
-    def _extract_archive_member(self, kind, archive, member_name, dest_dir):
+    def _extract_archive_member(
+            self,
+            kind: str,
+            archive: Any,
+            member_name: str,
+            dest_dir: str
+    ) -> Optional[str]:
         """Stream a single archive entry to dest_dir, preserving its relative path.
 
         Returns the path of the extracted file, or None if it was skipped.
@@ -881,23 +899,23 @@ class GrobidClient(ApiClient):
 
     def process_archive(
             self,
-            service,
-            archive_path,
-            output=None,
-            n=10,
-            generate_ids=False,
-            consolidate_header=True,
-            consolidate_citations=False,
-            include_raw_citations=False,
-            include_raw_affiliations=False,
-            tei_coordinates=False,
-            segment_sentences=False,
-            force=True,
-            verbose=False,
-            flavor=None,
-            json_output=False,
-            markdown_output=False
-    ):
+            service: str,
+            archive_path: str,
+            output: Optional[str] = None,
+            n: int = 10,
+            generate_ids: bool = False,
+            consolidate_header: bool = True,
+            consolidate_citations: bool = False,
+            include_raw_citations: bool = False,
+            include_raw_affiliations: bool = False,
+            tei_coordinates: bool = False,
+            segment_sentences: bool = False,
+            force: bool = True,
+            verbose: bool = False,
+            flavor: Optional[str] = None,
+            json_output: bool = False,
+            markdown_output: bool = False
+    ) -> None:
         """Process the eligible files contained in a zip/tar archive.
 
         The archive is never fully decompressed: entries are streamed to a
@@ -926,23 +944,23 @@ class GrobidClient(ApiClient):
 
     def _process_archive_core(
             self,
-            service,
-            archive_path,
-            output,
-            n,
-            generate_ids,
-            consolidate_header,
-            consolidate_citations,
-            include_raw_citations,
-            include_raw_affiliations,
-            tei_coordinates,
-            segment_sentences,
-            force,
-            verbose,
-            flavor,
-            json_output,
-            markdown_output
-    ):
+            service: str,
+            archive_path: str,
+            output: Optional[str],
+            n: int,
+            generate_ids: bool,
+            consolidate_header: bool,
+            consolidate_citations: bool,
+            include_raw_citations: bool,
+            include_raw_affiliations: bool,
+            tei_coordinates: bool,
+            segment_sentences: bool,
+            force: bool,
+            verbose: bool,
+            flavor: Optional[str],
+            json_output: bool,
+            markdown_output: bool
+    ) -> Tuple[int, int, int, int]:
         """Stream and process an archive; return (total, processed, errors, skipped).
 
         Does not print the final summary (the caller does), so it can be
@@ -1034,23 +1052,23 @@ class GrobidClient(ApiClient):
 
     def _process_remote_files(
             self,
-            service,
-            uris,
-            output,
-            n,
-            generate_ids,
-            consolidate_header,
-            consolidate_citations,
-            include_raw_citations,
-            include_raw_affiliations,
-            tei_coordinates,
-            segment_sentences,
-            force,
-            verbose,
-            flavor,
-            json_output,
-            markdown_output
-    ):
+            service: str,
+            uris: list,
+            output: Optional[str],
+            n: int,
+            generate_ids: bool,
+            consolidate_header: bool,
+            consolidate_citations: bool,
+            include_raw_citations: bool,
+            include_raw_affiliations: bool,
+            tei_coordinates: bool,
+            segment_sentences: bool,
+            force: bool,
+            verbose: bool,
+            flavor: Optional[str],
+            json_output: bool,
+            markdown_output: bool
+    ) -> Tuple[int, int, int, int]:
         """Stream loose remote (s3) files to a temp dir in chunks and process them.
 
         Returns (total, processed, errors, skipped). Objects are fetched a
