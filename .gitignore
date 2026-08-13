@@ -21,3 +21,4 @@ doc/
 build/
 dist/
 grobid_client_python.egg-info/
+.venv

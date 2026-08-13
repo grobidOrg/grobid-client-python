@@ -145,6 +145,9 @@ grobid_client [OPTIONS] SERVICE
 | `--flavor`                   | Processing flavor for fulltext extraction |
 | `--json`                     | Convert TEI output to JSON format         |
 | `--markdown`                 | Convert TEI output to Markdown format     |
+| `--typed_area`               | Enable sending typed-area layout JSON to GROBID |
+| `--typed_areas_dir`          | Directory of pre-computed JSON files      |
+| `--typed_area_server`        | URL of the PaddlePaddle server            |
 
 
 #### Examples
@@ -167,8 +170,22 @@ grobid_client --server https://grobid.example.com --input ~/citations.txt proces
 
 # Force reprocessing with sentence segmentation and JSON output
 grobid_client --input ~/docs --force --segment_sentences --json processFulltextDocument
+
+# Typed Area Processing (with PaddlePaddle server)
+# The client will fetch JSON from the paddle server and send it to Grobid
+grobid_client --input ~/pdfs --output ~/results --typed_area --typed_area_server h  processFulltextDocument
+
+# Typed Area Processing (with pre-computed offline JSON files)
+grobid_client --input ~/pdfs --output ~/results --typed_area --typed_areas_dir ~/precomputed_jsons processFulltextDocument
 ```
 
+###  Worker and Concurrency (Typed Areas)
+When using the `--typed_area_server` flag, the Grobid client makes requests to *both* the PaddlePaddle server and the Grobid server. 
+
+- **Grobid Client Threads (`--n`)**: Controls how many PDFs are processed concurrently.
+- **PaddlePaddle Server Workers (`--workers`)**: Controls how many concurrent layout requests the PaddlePaddle server can handle. 
+
+**Recommendation:** Set the PaddlePaddle server `--workers` to match the grobid-client `--n` threads (e.g., `--n 4` on the client and `--workers 4` on the server). 
 ### Python Library
 
 #### Basic Usage

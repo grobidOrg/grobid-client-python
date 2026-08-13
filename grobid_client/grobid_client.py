@@ -26,7 +26,7 @@ import re
 import requests
 import pathlib
 import logging
-from typing import Any, Optional, Tuple, Union
+from typing import Any, Optional, Tuple, Union, List
 import copy
 
 from .format.TEI2LossyJSON import TEI2LossyJSONConverter
@@ -81,7 +81,7 @@ class GrobidClient(ApiClient):
             self,
             grobid_server: Optional[str] = None,
             batch_size: Optional[int] = None,
-            coordinates: Optional[list] = None,
+            coordinates: Optional[List[str]] = None,
             sleep_time: Optional[int] = None,
             timeout: Optional[int] = None,
             config_path: Optional[str] = None,
@@ -375,7 +375,10 @@ class GrobidClient(ApiClient):
             verbose: bool = False,
             flavor: Optional[str] = None,
             json_output: bool = False,
-            markdown_output: bool = False
+            markdown_output: bool = False,
+            typed_area: bool = False,
+            typed_areas_dir: Optional[str] = None,
+            typed_area_server: Optional[str] = None
     ) -> None:
         start_time = time.time()
         batch_size_pdf = self.config["batch_size"]
@@ -444,7 +447,10 @@ class GrobidClient(ApiClient):
                     verbose,
                     flavor,
                     json_output,
-                    markdown_output
+                    markdown_output,
+                    typed_area,
+                    typed_areas_dir,
+                    typed_area_server
                 )
                 processed_files_count += batch_processed
                 errors_files_count += batch_errors
@@ -470,7 +476,10 @@ class GrobidClient(ApiClient):
                 verbose,
                 flavor,
                 json_output,
-                markdown_output
+                markdown_output,
+                typed_area,
+                typed_areas_dir,
+                typed_area_server
             )
             processed_files_count += batch_processed
             errors_files_count += batch_errors
@@ -493,7 +502,7 @@ class GrobidClient(ApiClient):
     def process_batch(
             self,
             service: str,
-            input_files: list,
+            input_files: List[str],
             input_path: str,
             output: Optional[str],
             n: int,
@@ -508,7 +517,10 @@ class GrobidClient(ApiClient):
             verbose: bool = False,
             flavor: Optional[str] = None,
             json_output: bool = False,
-            markdown_output: bool = False
+            markdown_output: bool = False,
+            typed_area: bool = False,
+            typed_areas_dir: Optional[str] = None,
+            typed_area_server: Optional[str] = None
     ) -> Tuple[int, int, int]:
         batch_start_time = time.time()
         if verbose:
@@ -593,7 +605,10 @@ class GrobidClient(ApiClient):
                     segment_sentences,
                     flavor,
                     -1,
-                    -1)
+                    -1,
+                    typed_area,
+                    typed_areas_dir,
+                    typed_area_server)
 
                 results.append(r)
 
@@ -677,6 +692,75 @@ class GrobidClient(ApiClient):
 
         return processed_count, error_count, skipped_count
 
+    def _resolve_typed_area(self, pdf_file: str, typed_areas_dir: Optional[str], typed_area_server: Optional[str]) -> Optional[str]:
+        """Resolve typed-area JSON for a PDF file.
+
+        Priority:
+            1. PaddlePaddle server (if typed_area_server is set)
+            2. Explicit directory (if typed_areas_dir is set)
+            3. Same directory as the PDF
+
+        Returns:
+            str or None: JSON string to attach as the typedAreas data field,
+                         or None if no typed-area data could be resolved.
+        """
+        stem = pathlib.Path(pdf_file).stem
+
+        #query the PaddlePaddle server
+        if typed_area_server:
+            try:
+                with open(pdf_file, "rb") as f:
+                    resp = requests.post(
+                        f"{typed_area_server.rstrip('/')}",
+                        files={"file": (os.path.basename(pdf_file), f, "application/pdf")},
+                        timeout=self.config["timeout"]
+                    )
+                if resp.status_code == 200:
+                    json_data = resp.json()
+                    
+                    # Save the JSON to disk
+                    save_dir = typed_areas_dir if typed_areas_dir else str(pathlib.Path(pdf_file).parent)
+                    os.makedirs(save_dir, exist_ok=True)
+                    json_path = os.path.join(save_dir, f"{stem}.json")
+                    try:
+                        with open(json_path, "w", encoding="utf-8") as f:
+                            json.dump(json_data, f, ensure_ascii=False, indent=2)
+                        self.logger.debug(f"Saved typed-area JSON to {json_path}")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to save typed-area JSON to {json_path}: {e}")
+
+                    # Extract just the elements array if present, as GROBID expects a JSON Array
+                    payload = json_data.get("elements", json_data) if isinstance(json_data, dict) else json_data
+                    return json.dumps(payload)
+                else:
+                    self.logger.warning(
+                        f"Typed-area server returned {resp.status_code} for {pdf_file}"
+                    )
+            except Exception as e:
+                self.logger.warning(
+                    f"Typed-area server request failed for {pdf_file}: {e}"
+                )
+            return None
+
+        # explicit directory, or same directory as the PDF
+        search_dir = typed_areas_dir if typed_areas_dir else str(pathlib.Path(pdf_file).parent)
+        json_path = os.path.join(search_dir, f"{stem}.json")
+
+        if os.path.isfile(json_path):
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    json_content = json.load(f)
+                    payload = json_content.get("elements", json_content) if isinstance(json_content, dict) else json_content
+                    return json.dumps(payload)
+            except Exception as e:
+                self.logger.warning(f"Failed to read typed-area JSON {json_path}: {e}")
+                return None
+
+        self.logger.warning(
+            f"No typed-area JSON found for {pdf_file} (looked in {search_dir})"
+        )
+        return None
+
     def process_pdf(
             self,
             service: str,
@@ -690,7 +774,10 @@ class GrobidClient(ApiClient):
             segment_sentences: bool,
             flavor: Optional[str] = None,
             start: int = -1,
-            end: int = -1
+            end: int = -1,
+            typed_area: bool = False,
+            typed_areas_dir: Optional[str] = None,
+            typed_area_server: Optional[str] = None
     ) -> Tuple[str, int, Optional[str]]:
         pdf_handle = None
         try:
@@ -730,6 +817,14 @@ class GrobidClient(ApiClient):
             if end and end > 0:
                 the_data["end"] = str(end)
 
+            # Resolve and attach typed-area JSON if enabled
+            if typed_area:
+                typed_area_json = self._resolve_typed_area(
+                    pdf_file, typed_areas_dir, typed_area_server
+                )
+                if typed_area_json:
+                    the_data["typedAreas"] = typed_area_json
+
             res, status = self.post(
                 url=the_url, files=files, data=the_data, headers={"Accept": "text/plain"},
                 timeout=self.config['timeout']
@@ -750,7 +845,10 @@ class GrobidClient(ApiClient):
                     segment_sentences,
                     flavor,
                     start,
-                    end
+                    end,
+                    typed_area,
+                    typed_areas_dir,
+                    typed_area_server
                 )
 
             return (pdf_file, status, res.text)
@@ -950,6 +1048,21 @@ def main() -> None:
         action="store_true",
         help="Convert TEI output to Markdown format",
     )
+    parser.add_argument(
+        "--typed_area",
+        action="store_true",
+        help="Enable typed-area support: attach PaddlePaddle layout JSON to each Grobid request",
+    )
+    parser.add_argument(
+        "--typed_areas_dir",
+        default=None,
+        help="Directory containing pre-computed typed-area JSON files (default: same directory as the PDF)",
+    )
+    parser.add_argument(
+        "--typed_area_server",
+        default=None,
+        help="URL of the PaddlePaddle typed-area server",
+    )
 
     args = parser.parse_args()
 
@@ -959,6 +1072,9 @@ def main() -> None:
     flavor = args.flavor
     json_output = args.json
     markdown_output = args.markdown
+    typed_area = args.typed_area
+    typed_areas_dir = args.typed_areas_dir
+    typed_area_server = args.typed_area_server
 
     # Initialize n with default value
     n = 10
@@ -1029,7 +1145,10 @@ def main() -> None:
             verbose=verbose,
             flavor=flavor,
             json_output=json_output,
-            markdown_output=markdown_output
+            markdown_output=markdown_output,
+            typed_area=typed_area,
+            typed_areas_dir=typed_areas_dir,
+            typed_area_server=typed_area_server
         )
     except Exception as e:
         logger.error(f"Processing failed: {str(e)}")
