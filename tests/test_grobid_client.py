@@ -799,3 +799,36 @@ class TestAnnotationServices:
             'segment_sentences': True,
         })
         client.logger.warning.assert_not_called()
+
+    @patch('builtins.open', new_callable=mock_open)
+    @patch('grobid_client.client.requests.request')
+    def test_accept_header_reaches_the_request(self, mock_request, mock_file):
+        """The per-service Accept header must survive down to the actual request.
+
+        The other tests here mock post() and assert on what process_pdf passes,
+        which is one layer above the request: call_api used to overwrite Accept
+        with its class-wide accept_type, so every service went out as
+        application/xml and the annotation endpoints were asked for the wrong
+        representation.
+        """
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.text = '{}'
+        mock_response.content = b'%PDF'
+        mock_request.return_value = mock_response
+
+        client = self._client()
+        sent = {}
+        for service in ('processFulltextDocument', 'referenceAnnotations', 'annotatePDF'):
+            client.process_pdf(
+                service, '/test/document.pdf',
+                generate_ids=False, consolidate_header=False, consolidate_citations=False,
+                include_raw_citations=False, include_raw_affiliations=False,
+                tei_coordinates=False, segment_sentences=False)
+            sent[service] = mock_request.call_args[1]['headers']['Accept']
+
+        assert sent == {
+            'processFulltextDocument': 'text/plain',
+            'referenceAnnotations': 'application/json',
+            'annotatePDF': 'application/pdf',
+        }

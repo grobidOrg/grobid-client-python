@@ -117,6 +117,25 @@ class TestApiClient:
         assert status == 200
 
     @patch('grobid_client.client.requests.request')
+    def test_call_api_keeps_the_caller_accept_header(self, mock_request):
+        """A caller asking for a representation must actually get it.
+
+        The annotation services (issue #79) need JSON or an annotated PDF back,
+        so the class-wide accept type is only the fallback.
+        """
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_request.return_value = mock_response
+
+        self.client.call_api(
+            method="POST",
+            url="http://test.com/api",
+            headers={"Accept": "application/pdf"},
+        )
+
+        assert mock_request.call_args[1]['headers']['Accept'] == 'application/pdf'
+
+    @patch('grobid_client.client.requests.request')
     def test_get_method(self, mock_request):
         """Test GET method."""
         mock_response = Mock()
