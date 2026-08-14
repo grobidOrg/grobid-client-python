@@ -121,7 +121,13 @@ class ApiClient(object):
             ResultParser or ErrorParser.
         """
         headers = deepcopy(headers) or {}
-        headers["Accept"] = self.accept_type
+        # Only the fallback: a caller asking for a specific representation must
+        # be able to get it. The GROBID annotation services answer with JSON
+        # coordinates or with an annotated PDF rather than with XML, and
+        # overwriting their Accept header here sent every request out as
+        # application/xml no matter what the caller passed.
+        # See https://github.com/grobidOrg/grobid-client-python/issues/79
+        headers.setdefault("Accept", self.accept_type)
         params = deepcopy(params) or {}
         data = data or {}
         files = files or {}
