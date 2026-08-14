@@ -49,8 +49,10 @@ class GrobidClient(ApiClient):
 
     # Default output descriptor for TEI-producing services: (Accept header,
     # output file suffix, binary output). All the "process*" services return
-    # TEI XML as text.
-    DEFAULT_SERVICE_OUTPUT: Tuple[str, str, bool] = ("text/plain", ".grobid.tei.xml", False)
+    # TEI XML, which is what they have effectively been asking for all along:
+    # the "text/plain" this client used to pass never reached the wire, since
+    # call_api replaced it with its own application/xml.
+    DEFAULT_SERVICE_OUTPUT: Tuple[str, str, bool] = ("application/xml", ".grobid.tei.xml", False)
 
     # PDF annotation services return either JSON coordinates or an annotated
     # (binary) PDF instead of TEI XML, so they need their own Accept header,

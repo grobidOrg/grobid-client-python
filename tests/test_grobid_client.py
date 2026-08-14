@@ -687,7 +687,7 @@ class TestAnnotationServices:
         """Unknown/regular services fall back to the TEI output descriptor."""
         client = self._client()
         assert client._service_output('processFulltextDocument') == \
-            ('text/plain', '.grobid.tei.xml', False)
+            ('application/xml', '.grobid.tei.xml', False)
 
     def test_service_output_annotation_services(self):
         """Annotation services expose their own Accept header/suffix/binary flag."""
@@ -828,7 +828,7 @@ class TestAnnotationServices:
             sent[service] = mock_request.call_args[1]['headers']['Accept']
 
         assert sent == {
-            'processFulltextDocument': 'text/plain',
+            'processFulltextDocument': 'application/xml',
             'referenceAnnotations': 'application/json',
             'annotatePDF': 'application/pdf',
         }
