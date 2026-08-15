@@ -861,6 +861,136 @@ class TestArchiveInput:
             client.logger.warning.assert_called()
 
 
+class TestEngineConcurrencyPreflight:
+    """In-memory runs check the server's engine pool against the client concurrency.
+
+    An in-memory run keeps up to n documents in flight, so before starting one
+    the client asks /api/health how many engines the server actually has and
+    flags a mismatch. The check is advisory: a server without the endpoint
+    (older GROBID) or an unreadable answer never blocks the run.
+    """
+
+    def _client(self):
+        with patch('grobid_client.grobid_client.GrobidClient._test_server_connection'):
+            with patch('grobid_client.grobid_client.GrobidClient._configure_logging'):
+                client = GrobidClient(check_server=False)
+        client.logger = Mock()
+        return client
+
+    @staticmethod
+    def _health(max_active, ready=True):
+        """A response shaped like a real GROBID /api/health answer."""
+        response = Mock()
+        response.status_code = 200 if ready else 503
+        response.json.return_value = {
+            "initialized": True,
+            "ready": ready,
+            "pool": {"initialized": True, "active": 0, "idle": 0, "maxActive": max_active},
+            "models": {"loaded": {"segmentation": "wapiti", "header": "delft"},
+                       "failed": {}, "totalLoaded": 2, "totalFailed": 0},
+            "grobidHomeConfigured": True,
+        }
+        return response
+
+    def test_warns_when_concurrency_exceeds_engines(self):
+        client = self._client()
+        with patch('grobid_client.grobid_client.requests.get', return_value=self._health(4)) as mock_get:
+            client._warn_on_engine_concurrency(10)
+        mock_get.assert_called_once_with('http://localhost:8070/api/health', timeout=10)
+        warning = client.logger.warning.call_args[0][0]
+        assert '10' in warning and '4 engine' in warning
+
+    def test_silent_when_they_match(self):
+        client = self._client()
+        with patch('grobid_client.grobid_client.requests.get', return_value=self._health(10)):
+            client._warn_on_engine_concurrency(10)
+        client.logger.warning.assert_not_called()
+        client.logger.info.assert_not_called()
+
+    def test_informs_when_engines_outnumber_concurrency(self):
+        """Idle engines are not an error, but the user should know they are there."""
+        client = self._client()
+        with patch('grobid_client.grobid_client.requests.get', return_value=self._health(20)):
+            client._warn_on_engine_concurrency(10)
+        client.logger.warning.assert_not_called()
+        assert '20' in client.logger.info.call_args[0][0]
+
+    def test_warns_when_server_not_ready(self):
+        client = self._client()
+        with patch('grobid_client.grobid_client.requests.get', return_value=self._health(4, ready=False)):
+            client._warn_on_engine_concurrency(4)
+        assert 'not ready' in client.logger.warning.call_args[0][0]
+
+    def test_survives_a_server_without_the_endpoint(self):
+        """Older GROBID answers 404 with a non-JSON body; the run must go on."""
+        client = self._client()
+        response = Mock()
+        response.status_code = 404
+        response.json.side_effect = ValueError('not json')
+        with patch('grobid_client.grobid_client.requests.get', return_value=response):
+            client._warn_on_engine_concurrency(10)
+        client.logger.warning.assert_not_called()
+
+    def test_survives_a_connection_error(self):
+        client = self._client()
+        with patch('grobid_client.grobid_client.requests.get',
+                   side_effect=requests.exceptions.ConnectionError('down')):
+            client._warn_on_engine_concurrency(10)
+        client.logger.warning.assert_not_called()
+
+    def test_process_documents_runs_the_preflight(self):
+        client = self._client()
+
+        def fake_post(url=None, files=None, data=None, headers=None, timeout=None):
+            resp = Mock()
+            resp.text = '<TEI>ok</TEI>'
+            return (resp, 200)
+
+        with patch.object(GrobidClient, 'post', side_effect=fake_post):
+            with patch.object(GrobidClient, '_warn_on_engine_concurrency') as mock_check:
+                client.process_documents('processFulltextDocument', [b'%PDF-1.4 a'], n=3)
+        mock_check.assert_called_once_with(3)
+
+    def test_archive_processing_runs_the_preflight(self):
+        import zipfile
+        client = self._client()
+        client.config['batch_size'] = 10
+        with tempfile.TemporaryDirectory() as d:
+            zip_path = os.path.join(d, 'docs.zip')
+            with zipfile.ZipFile(zip_path, 'w') as z:
+                z.writestr('a.pdf', b'%PDF')
+
+            def fake_post(url, files=None, data=None, headers=None, timeout=None):
+                resp = Mock()
+                resp.text = '<TEI>ok</TEI>'
+                return (resp, 200)
+
+            with patch.object(GrobidClient, 'post', side_effect=fake_post):
+                with patch.object(GrobidClient, '_warn_on_engine_concurrency') as mock_check:
+                    client.process('processFulltextDocument', zip_path,
+                                   output=os.path.join(d, 'out'), n=5, force=True)
+        mock_check.assert_called_once_with(5)
+
+    def test_local_files_skip_the_preflight(self):
+        """Plain file processing does not gain a new health call."""
+        client = self._client()
+        client.config['batch_size'] = 10
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, 'a.pdf'), 'wb') as f:
+                f.write(b'%PDF')
+
+            def fake_post(url, files=None, data=None, headers=None, timeout=None):
+                resp = Mock()
+                resp.text = '<TEI>ok</TEI>'
+                return (resp, 200)
+
+            with patch.object(GrobidClient, 'post', side_effect=fake_post):
+                with patch.object(GrobidClient, '_warn_on_engine_concurrency') as mock_check:
+                    client.process('processFulltextDocument', d,
+                                   output=os.path.join(d, 'out'), force=True)
+        mock_check.assert_not_called()
+
+
 class TestGlobInput:
     """Tests for glob-pattern input resolution (--input as a glob)."""
 

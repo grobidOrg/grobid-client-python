@@ -339,6 +339,11 @@ Documents that do not name themselves are named `document-1.pdf`, `document-2.pd
 come back **in the order the documents were given**, not in completion order, so they can be zipped back onto whatever
 the caller has them keyed by. A document that fails does not stop the others: its own entry carries the error status.
 
+Before an in-memory run starts (this includes archive and `s3://` streaming), the client asks the server's `/api/health`
+how many engines it actually has and logs a warning when the requested concurrency `n` exceeds them - the surplus
+requests would only queue on the server or bounce as 503 - and an info message when engines would sit idle. The check is
+advisory: a server without the endpoint (older GROBID) never blocks the run.
+
 > [!NOTE]
 > Both return the TEI instead of writing it to disk, so the caller decides what to do with it. Use `process()` for the
 > directory-oriented processing with resume and JSON/Markdown conversion.

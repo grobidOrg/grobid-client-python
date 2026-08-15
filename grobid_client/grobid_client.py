@@ -372,6 +372,45 @@ class GrobidClient(ApiClient):
             self.logger.error(error_msg)
             raise ServerUnavailableException(error_msg) from e
 
+    def _warn_on_engine_concurrency(self, n: int) -> None:
+        """Preflight for in-memory runs: compare client concurrency to the server pool.
+
+        An in-memory run keeps up to ``n`` documents in flight against the
+        server, so asking for more concurrency than the server has engines only
+        piles up requests that queue there or come back as 503, while asking
+        for less leaves engines idle. The pool size comes from ``/api/health``
+        (``pool.maxActive``); a server without that endpoint (older GROBID) or
+        an unreadable answer is left alone - this is advisory, not a gate.
+        """
+        try:
+            response = requests.get(self.get_server_url("health"), timeout=10)
+            payload = response.json()
+        except Exception as e:
+            self.logger.debug(f"Concurrency preflight skipped, /api/health not readable: {str(e)}")
+            return
+
+        if not isinstance(payload, dict):
+            return
+
+        if payload.get("ready") is False:
+            self.logger.warning(
+                f"GROBID server {self.config['grobid_server']} reports it is not ready (/api/health)")
+
+        pool = payload.get("pool")
+        max_active = pool.get("maxActive") if isinstance(pool, dict) else None
+        if not isinstance(max_active, int) or max_active <= 0:
+            return
+
+        if n > max_active:
+            self.logger.warning(
+                f"Client concurrency {n} exceeds the {max_active} engine(s) of the GROBID server: "
+                f"the surplus requests will queue on the server or be retried on 503. "
+                f"Consider n={max_active}, or raising 'concurrency' in the server's grobid.yaml.")
+        elif n < max_active:
+            self.logger.info(
+                f"The GROBID server has {max_active} engines but the client concurrency is only {n}; "
+                f"n={max_active} would use them all.")
+
     def _output_file_name(
             self,
             input_file: str,
@@ -585,6 +624,12 @@ class GrobidClient(ApiClient):
         if not fs_files and not archive_paths and not remote_files:
             self.logger.warning(f"No eligible files found in input(s): {inputs}")
             return
+
+        # Archives and remote files are about to be processed from memory with
+        # up to n documents in flight, so check upfront that the server has the
+        # engines to take them (citation lists take the disk route instead).
+        if (archive_paths or remote_files) and service != 'processCitationList':
+            self._warn_on_engine_concurrency(n)
 
         processed_files_count = 0
         errors_files_count = 0
@@ -1022,6 +1067,10 @@ class GrobidClient(ApiClient):
         """
         start_time = time.time()
         self._warn_on_consolidation_timeout(consolidate_citations)
+
+        # Entries are about to be posted from memory with up to n in flight
+        if service != 'processCitationList':
+            self._warn_on_engine_concurrency(n)
 
         total_files, processed, errors, skipped = self._process_archive_core(
             service, archive_path, output, n, generate_ids, consolidate_header,
@@ -1768,6 +1817,8 @@ class GrobidClient(ApiClient):
 
         if verbose:
             self.logger.info(f"{len(items)} document(s) to process")
+
+        self._warn_on_engine_concurrency(max(1, n))
 
         # A pool of one is still a pool: n < 1 would make ThreadPoolExecutor raise
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, n)) as executor:
