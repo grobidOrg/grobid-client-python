@@ -140,6 +140,38 @@ def test_process_paths_mixed_local_and_s3(tmp_path):
     assert _tei(out) == ["0000009.grobid.tei.xml", "local.grobid.tei.xml"]
 
 
+@mock_aws
+def test_process_s3_never_touches_disk(tmp_path):
+    """Loose PDFs and zip entries go from S3 straight to GROBID, in memory."""
+    s3 = boto3.client("s3", region_name=REGION)
+    s3.create_bucket(Bucket=BUCKET)
+    s3.put_object(Bucket=BUCKET, Key="pdfs/0000001.pdf", Body=b"%PDF-mem")
+    s3.put_object(Bucket=BUCKET, Key="arch/docs.zip", Body=_zip_bytes({"z.pdf": b"%PDF-z"}))
+
+    c = _client()
+    out = str(tmp_path / "out")
+    posted = []
+
+    def fake_post(url, files=None, data=None, headers=None, timeout=None):
+        # content read inside the call: the handle is closed right after it
+        posted.append((files["input"][0], files["input"][1].read()))
+        resp = Mock()
+        resp.text = "<TEI>ok</TEI>"
+        return (resp, 200)
+
+    with patch.object(GrobidClient, "post", side_effect=fake_post):
+        with patch("grobid_client.grobid_client.tempfile.mkdtemp") as mock_mkdtemp:
+            c.process_paths(
+                "processFulltextDocument",
+                [f"s3://{BUCKET}/pdfs/*.pdf", f"s3://{BUCKET}/arch/docs.zip"],
+                output=out, force=True,
+            )
+
+    mock_mkdtemp.assert_not_called()
+    assert sorted(posted) == [("0000001.pdf", b"%PDF-mem"), ("z.pdf", b"%PDF-z")]
+    assert _tei(out) == ["0000001.grobid.tei.xml", "z.grobid.tei.xml"]
+
+
 def test_missing_extra_raises_helpful_error():
     """If smart_open isn't importable, a clear install hint is raised."""
     c = _client()

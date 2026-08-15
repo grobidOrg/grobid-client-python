@@ -706,18 +706,22 @@ class TestArchiveInput:
                 t.add(member_path, arcname=name)
 
     def _run(self, client, archive, output):
-        """Run archive processing with a fake GROBID post; return set of temp dirs used."""
-        temp_dirs = set()
+        """Run archive processing with a fake GROBID post; return what was posted.
+
+        Every multipart part is recorded as (name, content). The content has to
+        be read inside the call: the handle is closed before process_pdf returns.
+        """
+        posted = []
 
         def fake_post(url, files=None, data=None, headers=None, timeout=None):
-            temp_dirs.add(os.path.dirname(files['input'][0]))
+            posted.append((files['input'][0], files['input'][1].read()))
             resp = Mock()
             resp.text = '<TEI>ok</TEI>'
             return (resp, 200)
 
         with patch.object(GrobidClient, 'post', side_effect=fake_post):
             client.process('processFulltextDocument', archive, output=output, force=True)
-        return temp_dirs
+        return posted
 
     @staticmethod
     def _tei_outputs(output_dir):
@@ -763,13 +767,16 @@ class TestArchiveInput:
                 'ignore.txt': b'not a pdf',
             })
             out = os.path.join(d, 'out')
-            temp_dirs = self._run(client, zip_path, out)
+            posted = self._run(client, zip_path, out)
 
             # all 3 PDFs processed, the .txt ignored
             assert self._tei_outputs(out) == ['a.grobid.tei.xml', 'b.grobid.tei.xml', 'c.grobid.tei.xml']
-            # 3 files with batch_size 2 => 2 chunks => distinct temp dirs, all cleaned up
-            assert len(temp_dirs) >= 2
-            assert all(not os.path.exists(td) for td in temp_dirs)
+            # each entry was posted straight from memory, under its archive name
+            assert sorted(posted) == [
+                ('a.pdf', b'%PDF-a'),
+                ('c.PDF', b'%PDF-c'),
+                (os.path.join('sub', 'b.pdf'), b'%PDF-b'),
+            ]
 
     def test_process_targz(self):
         client = self._client(batch_size=10)
@@ -777,9 +784,12 @@ class TestArchiveInput:
             tar_path = os.path.join(d, 'docs.tar.gz')
             self._make_targz(tar_path, {'x.pdf': b'%PDF-x', 'nested/y.pdf': b'%PDF-y'}, d)
             out = os.path.join(d, 'out')
-            temp_dirs = self._run(client, tar_path, out)
+            posted = self._run(client, tar_path, out)
             assert self._tei_outputs(out) == ['x.grobid.tei.xml', 'y.grobid.tei.xml']
-            assert all(not os.path.exists(td) for td in temp_dirs)
+            assert sorted(posted) == [
+                (os.path.join('nested', 'y.pdf'), b'%PDF-y'),
+                ('x.pdf', b'%PDF-x'),
+            ]
 
     def test_process_routes_archive_to_core(self):
         client = self._client()
@@ -798,6 +808,47 @@ class TestArchiveInput:
             self._make_zip(zip_path, {'a.pdf': b'%PDF'})
             self._run(client, zip_path, None)  # no output -> defaults to <stem>
             assert self._tei_outputs(os.path.join(d, 'mydocs')) == ['a.grobid.tei.xml']
+
+    def test_archive_entries_never_touch_disk(self):
+        """PDFs go from the archive straight to GROBID, without a temp dir."""
+        client = self._client(batch_size=2)
+        with tempfile.TemporaryDirectory() as d:
+            zip_path = os.path.join(d, 'docs.zip')
+            self._make_zip(zip_path, {'a.pdf': b'%PDF-a', 'sub/b.pdf': b'%PDF-b'})
+            out = os.path.join(d, 'out')
+
+            def fake_post(url, files=None, data=None, headers=None, timeout=None):
+                resp = Mock()
+                resp.text = '<TEI>ok</TEI>'
+                return (resp, 200)
+
+            with patch.object(GrobidClient, 'post', side_effect=fake_post):
+                with patch('grobid_client.grobid_client.tempfile.mkdtemp') as mock_mkdtemp:
+                    client.process('processFulltextDocument', zip_path, output=out, force=True)
+
+            mock_mkdtemp.assert_not_called()
+            assert self._tei_outputs(out) == ['a.grobid.tei.xml', 'b.grobid.tei.xml']
+
+    def test_citation_lists_are_still_extracted_to_disk(self):
+        """process_txt reads from a path, so citation lists keep the temp-dir route."""
+        client = self._client(batch_size=10)
+        with tempfile.TemporaryDirectory() as d:
+            zip_path = os.path.join(d, 'refs.zip')
+            self._make_zip(zip_path, {'refs.txt': b'one reference per line'})
+            seen = {}
+
+            def spy_batch(service, files, input_path, *args, **kwargs):
+                seen['files'] = list(files)
+                seen['on_disk'] = [os.path.isfile(f) for f in files]
+                return (len(files), 0, 0)
+
+            with patch.object(GrobidClient, 'process_batch', side_effect=spy_batch):
+                client.process('processCitationList', zip_path, output=os.path.join(d, 'o'))
+
+            assert seen['on_disk'] == [True]
+            assert [os.path.basename(f) for f in seen['files']] == ['refs.txt']
+            # and the extraction dir is gone once the batch is done
+            assert not os.path.exists(seen['files'][0])
 
     def test_empty_archive_warns(self):
         client = self._client()

@@ -606,7 +606,7 @@ class GrobidClient(ApiClient):
             skipped_files_count += bs
             total_files += len(fs_files)
 
-        # Loose remote (s3) files: streamed to a temp dir one chunk at a time
+        # Loose remote (s3) files: streamed into memory one chunk at a time
         if remote_files:
             rt, rp, re_count, rs = self._process_remote_files(
                 service, remote_files, output, n,
@@ -961,6 +961,34 @@ class GrobidClient(ApiClient):
 
         return target
 
+    def _read_archive_member(self, kind: str, archive: Any, member_name: str) -> Optional[BinaryIO]:
+        """Read a single archive entry into memory as a named document.
+
+        The entry never touches the disk: it goes straight from the archive to
+        process_pdf, which accepts a named stream. The stream is named after the
+        entry (sanitized the same way extraction is), and that name is what the
+        output file is derived from. Returns None if the entry is unusable.
+        """
+        name = self._safe_member_path("", member_name)
+        if name is None:
+            self.logger.warning(f"Skipping archive entry with unsafe path: {member_name}")
+            return None
+
+        if kind == "zip":
+            source = archive.open(member_name)
+        else:
+            source = archive.extractfile(archive.getmember(member_name))
+            if source is None:
+                return None
+
+        try:
+            document = io.BytesIO(source.read())
+        finally:
+            source.close()
+
+        document.name = name
+        return document
+
     def process_archive(
             self,
             service: str,
@@ -983,13 +1011,14 @@ class GrobidClient(ApiClient):
     ) -> None:
         """Process the eligible files contained in a zip/tar archive.
 
-        The archive is never fully decompressed: entries are streamed to a
-        temporary directory in chunks of ``batch_size`` (from the config), each
-        chunk is sent to GROBID via ``process_batch``, and the temporary files
-        are removed before the next chunk is extracted. This keeps disk usage
-        bounded regardless of the archive size. Output files follow the same
-        flat naming convention as directory processing (one ``<stem>`` per
-        result, in ``output``).
+        The archive is never fully decompressed: entries are read straight into
+        memory in chunks of ``batch_size`` (from the config) and each chunk is
+        sent to GROBID via ``process_batch``, so memory usage stays bounded by
+        the chunk size and nothing but the results ever touches the disk. (The
+        exception is ``processCitationList``, whose ``.txt`` inputs are read
+        from a path and therefore still go through a temporary directory.)
+        Output files follow the same flat naming convention as directory
+        processing (one ``<stem>`` per result, in ``output``).
         """
         start_time = time.time()
         self._warn_on_consolidation_timeout(consolidate_citations)
@@ -1068,8 +1097,51 @@ class GrobidClient(ApiClient):
 
             print(f"Found {total_files} file(s) to process in {archive_path}")
 
+            # Citation lists go through process_txt, which reads from a path, so
+            # they still take the extract-to-a-temp-dir route. Everything else is
+            # read straight from the archive into memory and posted from there.
+            use_disk = service == 'processCitationList'
+
             for chunk_start in range(0, total_files, batch_size_pdf):
                 chunk = eligible_members[chunk_start:chunk_start + batch_size_pdf]
+
+                if not use_disk:
+                    documents = []
+                    for member_name in chunk:
+                        if verbose:
+                            self.logger.info(f"Reading {member_name} from {archive_path}")
+                        document = self._read_archive_member(kind, archive, member_name)
+                        if document is not None:
+                            documents.append(document)
+
+                    if not documents:
+                        continue
+
+                    batch_processed, batch_errors, batch_skipped = self.process_batch(
+                        service,
+                        documents,
+                        ".",
+                        output,
+                        n,
+                        generate_ids,
+                        consolidate_header,
+                        consolidate_citations,
+                        include_raw_citations,
+                        include_raw_affiliations,
+                        tei_coordinates,
+                        segment_sentences,
+                        force,
+                        verbose,
+                        flavor,
+                        json_output,
+                        markdown_output,
+                        skip_errors=skip_errors
+                    )
+                    processed_files_count += batch_processed
+                    errors_files_count += batch_errors
+                    skipped_files_count += batch_skipped
+                    continue
+
                 temp_dir = tempfile.mkdtemp(prefix="grobid_archive_")
                 try:
                     extracted_files = []
@@ -1139,10 +1211,11 @@ class GrobidClient(ApiClient):
             markdown_output: bool,
             skip_errors: bool = False
     ) -> Tuple[int, int, int, int]:
-        """Stream loose remote (s3) files to a temp dir in chunks and process them.
+        """Stream loose remote (s3) files into memory in chunks and process them.
 
         Returns (total, processed, errors, skipped). Objects are fetched a
-        batch at a time and deleted before the next chunk, so disk stays bounded.
+        batch at a time straight into memory, so nothing is written to disk and
+        memory stays bounded by the chunk size.
         """
         total = len(uris)
         if total == 0:
@@ -1157,8 +1230,57 @@ class GrobidClient(ApiClient):
         error_count = 0
         skipped_count = 0
 
+        # Citation lists go through process_txt, which reads from a path, so
+        # they still take the download-to-a-temp-dir route. Everything else is
+        # fetched straight into memory and posted from there.
+        use_disk = service == 'processCitationList'
+
         for chunk_start in range(0, total, batch_size_pdf):
             chunk = uris[chunk_start:chunk_start + batch_size_pdf]
+
+            if not use_disk:
+                documents = []
+                for uri in chunk:
+                    if verbose:
+                        self.logger.info(f"Fetching {uri}")
+                    try:
+                        with self._s3_open(uri) as source:
+                            document = io.BytesIO(source.read())
+                    except Exception as e:
+                        self.logger.error(f"Failed to fetch {uri}: {str(e)}")
+                        error_count += 1
+                        continue
+                    document.name = self._s3_basename(uri)
+                    documents.append(document)
+
+                if not documents:
+                    continue
+
+                batch_processed, batch_errors, batch_skipped = self.process_batch(
+                    service,
+                    documents,
+                    ".",
+                    output,
+                    n,
+                    generate_ids,
+                    consolidate_header,
+                    consolidate_citations,
+                    include_raw_citations,
+                    include_raw_affiliations,
+                    tei_coordinates,
+                    segment_sentences,
+                    force,
+                    verbose,
+                    flavor,
+                    json_output,
+                    markdown_output,
+                    skip_errors=skip_errors
+                )
+                processed_count += batch_processed
+                error_count += batch_errors
+                skipped_count += batch_skipped
+                continue
+
             temp_dir = tempfile.mkdtemp(prefix="grobid_s3_")
             try:
                 local_files = []
@@ -1239,8 +1361,13 @@ class GrobidClient(ApiClient):
             # with concurrent.futures.ProcessPoolExecutor(max_workers=n) as executor:
             results = []
             for input_file in input_files:
+                # An entry is either a path or an in-memory document (a named
+                # stream, as fed by the archive/s3 streaming). Either way it goes
+                # by its name here, and process_pdf returns that same name, so
+                # the results below land on the same output file.
+                input_name = input_file if isinstance(input_file, str) else self._document_name(input_file)
                 # check if TEI file is already produced
-                filename = self._output_file_name(input_file, input_path, output)
+                filename = self._output_file_name(input_name, input_path, output)
                 if not force and os.path.isfile(filename):
                     self.logger.info(
                         f"{filename} already exists, skipping... (use --force to reprocess pdf input files)")
@@ -1296,7 +1423,7 @@ class GrobidClient(ApiClient):
                     previous_errors = self._find_error_files(filename)
                     if previous_errors:
                         self.logger.info(
-                            f"{input_file} previously failed ({os.path.basename(previous_errors[0])}), "
+                            f"{input_name} previously failed ({os.path.basename(previous_errors[0])}), "
                             f"skipping... (use --force to retry it)")
                         skipped_count += 1
                         continue
@@ -1306,7 +1433,7 @@ class GrobidClient(ApiClient):
                     selected_process = self.process_txt
 
                 if verbose:
-                    self.logger.info(f"Adding {input_file} to the queue")
+                    self.logger.info(f"Adding {input_name} to the queue")
 
                 r = executor.submit(
                     selected_process,
