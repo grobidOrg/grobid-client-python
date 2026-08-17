@@ -39,7 +39,7 @@ class TestTEIConversions:
 
         self.test_config = {
             'grobid_server': 'http://localhost:8070',
-            'batch_size': 10,
+            'queue_size': 10,
             'sleep_time': 5,
             'timeout': 180,
             'logging': {

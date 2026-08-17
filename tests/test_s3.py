@@ -34,12 +34,12 @@ def _aws_env(monkeypatch):
     monkeypatch.setenv("AWS_DEFAULT_REGION", REGION)
 
 
-def _client(batch_size=2):
+def _client(queue_size=2):
     with patch.object(GrobidClient, "_test_server_connection"):
         with patch.object(GrobidClient, "_configure_logging"):
             c = GrobidClient(check_server=False)
     c.logger = Mock()
-    c.config["batch_size"] = batch_size
+    c.config["queue_size"] = queue_size
     return c
 
 

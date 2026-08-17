@@ -23,7 +23,7 @@ def temp_config_file(temp_dir):
     """Create a temporary config file for tests."""
     config = {
         'grobid_server': 'http://localhost:8070',
-        'batch_size': 10,
+        'queue_size': 10,
         'coordinates': ["persName", "figure"],
         'sleep_time': 2,
         'timeout': 30,

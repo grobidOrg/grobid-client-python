@@ -22,7 +22,7 @@ class TestGrobidClient:
         """Set up test fixtures."""
         self.test_config = {
             'grobid_server': 'http://localhost:8070',
-            'batch_size': 1000,
+            'queue_size': 1000,
             'coordinates': ["persName", "figure", "ref"],
             'sleep_time': 5,
             'timeout': 60,
@@ -43,7 +43,7 @@ class TestGrobidClient:
         client = GrobidClient(check_server=False)
 
         assert client.config['grobid_server'] == 'http://localhost:8070'
-        assert client.config['batch_size'] == 10
+        assert client.config['queue_size'] == 10
         assert client.config['sleep_time'] == 5
         assert client.config['timeout'] == 180
         assert 'persName' in client.config['coordinates']
@@ -58,7 +58,7 @@ class TestGrobidClient:
         custom_coords = ["figure", "ref"]
         client = GrobidClient(
             grobid_server='http://custom:9090',
-            batch_size=500,
+            queue_size=500,
             coordinates=custom_coords,
             sleep_time=10,
             timeout=120,
@@ -66,7 +66,7 @@ class TestGrobidClient:
         )
 
         assert client.config['grobid_server'] == 'http://custom:9090'
-        assert client.config['batch_size'] == 500
+        assert client.config['queue_size'] == 500
         assert client.config['coordinates'] == custom_coords
         assert client.config['sleep_time'] == 10
         assert client.config['timeout'] == 120
@@ -113,6 +113,19 @@ class TestGrobidClient:
 
         mock_file.assert_called_once_with('/path/to/config.json', 'r')
         assert client.config['grobid_server'] == 'http://test:8080'
+
+    @patch('builtins.open', new_callable=mock_open, read_data='{"batch_size": 250}')
+    @patch('grobid_client.grobid_client.GrobidClient._test_server_connection')
+    @patch('grobid_client.grobid_client.GrobidClient._configure_logging')
+    def test_load_config_legacy_batch_size(self, mock_configure_logging, mock_test_server, mock_file):
+        """Test that the deprecated batch_size config key is mapped to queue_size."""
+        mock_test_server.return_value = (True, 200)
+
+        client = GrobidClient(check_server=False)
+        client._load_config('/path/to/config.json')
+
+        assert client.config['queue_size'] == 250
+        assert 'batch_size' not in client.config
 
     @patch('grobid_client.grobid_client.GrobidClient._test_server_connection')
     @patch('grobid_client.grobid_client.GrobidClient._configure_logging')
@@ -680,12 +693,12 @@ class TestEdgeCases:
 class TestArchiveInput:
     """Tests for streaming zip/tar archives as input (process_archive)."""
 
-    def _client(self, batch_size=2):
+    def _client(self, queue_size=2):
         with patch('grobid_client.grobid_client.GrobidClient._test_server_connection'):
             with patch('grobid_client.grobid_client.GrobidClient._configure_logging'):
                 client = GrobidClient(check_server=False)
         client.logger = Mock()
-        client.config['batch_size'] = batch_size
+        client.config['queue_size'] = queue_size
         return client
 
     @staticmethod
@@ -757,7 +770,7 @@ class TestArchiveInput:
         assert client._safe_member_path(dest, '.') is None
 
     def test_process_zip_streams_all_pdfs(self):
-        client = self._client(batch_size=2)
+        client = self._client(queue_size=2)
         with tempfile.TemporaryDirectory() as d:
             zip_path = os.path.join(d, 'docs.zip')
             self._make_zip(zip_path, {
@@ -779,7 +792,7 @@ class TestArchiveInput:
             ]
 
     def test_process_targz(self):
-        client = self._client(batch_size=10)
+        client = self._client(queue_size=10)
         with tempfile.TemporaryDirectory() as d:
             tar_path = os.path.join(d, 'docs.tar.gz')
             self._make_targz(tar_path, {'x.pdf': b'%PDF-x', 'nested/y.pdf': b'%PDF-y'}, d)
@@ -802,7 +815,7 @@ class TestArchiveInput:
                 assert mock_core.call_args.args[1] == zip_path
 
     def test_process_zip_default_output_named_after_archive(self):
-        client = self._client(batch_size=10)
+        client = self._client(queue_size=10)
         with tempfile.TemporaryDirectory() as d:
             zip_path = os.path.join(d, 'mydocs.zip')
             self._make_zip(zip_path, {'a.pdf': b'%PDF'})
@@ -811,7 +824,7 @@ class TestArchiveInput:
 
     def test_archive_entries_never_touch_disk(self):
         """PDFs go from the archive straight to GROBID, without a temp dir."""
-        client = self._client(batch_size=2)
+        client = self._client(queue_size=2)
         with tempfile.TemporaryDirectory() as d:
             zip_path = os.path.join(d, 'docs.zip')
             self._make_zip(zip_path, {'a.pdf': b'%PDF-a', 'sub/b.pdf': b'%PDF-b'})
@@ -831,7 +844,7 @@ class TestArchiveInput:
 
     def test_citation_lists_are_still_extracted_to_disk(self):
         """process_txt reads from a path, so citation lists keep the temp-dir route."""
-        client = self._client(batch_size=10)
+        client = self._client(queue_size=10)
         with tempfile.TemporaryDirectory() as d:
             zip_path = os.path.join(d, 'refs.zip')
             self._make_zip(zip_path, {'refs.txt': b'one reference per line'})
@@ -954,7 +967,7 @@ class TestEngineConcurrencyPreflight:
     def test_archive_processing_runs_the_preflight(self):
         import zipfile
         client = self._client()
-        client.config['batch_size'] = 10
+        client.config['queue_size'] = 10
         with tempfile.TemporaryDirectory() as d:
             zip_path = os.path.join(d, 'docs.zip')
             with zipfile.ZipFile(zip_path, 'w') as z:
@@ -974,7 +987,7 @@ class TestEngineConcurrencyPreflight:
     def test_local_files_skip_the_preflight(self):
         """Plain file processing does not gain a new health call."""
         client = self._client()
-        client.config['batch_size'] = 10
+        client.config['queue_size'] = 10
         with tempfile.TemporaryDirectory() as d:
             with open(os.path.join(d, 'a.pdf'), 'wb') as f:
                 f.write(b'%PDF')
@@ -994,12 +1007,12 @@ class TestEngineConcurrencyPreflight:
 class TestGlobInput:
     """Tests for glob-pattern input resolution (--input as a glob)."""
 
-    def _client(self, batch_size=50):
+    def _client(self, queue_size=50):
         with patch('grobid_client.grobid_client.GrobidClient._test_server_connection'):
             with patch('grobid_client.grobid_client.GrobidClient._configure_logging'):
                 client = GrobidClient(check_server=False)
         client.logger = Mock()
-        client.config['batch_size'] = batch_size
+        client.config['queue_size'] = queue_size
         return client
 
     @staticmethod
@@ -1213,7 +1226,7 @@ class TestSkipErrors:
             with patch('grobid_client.grobid_client.GrobidClient._configure_logging'):
                 client = GrobidClient(check_server=False)
         client.logger = Mock()
-        client.config['batch_size'] = 50
+        client.config['queue_size'] = 50
         return client
 
     @staticmethod

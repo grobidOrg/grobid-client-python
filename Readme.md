@@ -190,7 +190,7 @@ grobid_client --input "~/data/**/*.pdf"   --output ~/results processFulltextDocu
 > [!NOTE]
 > `--input` accepts a directory, a single file, an **archive**, or a **glob pattern**:
 > - **Archives** (`.zip`, `.tar`, `.tar.gz`/`.tgz`, `.tar.bz2`/`.tbz2`) are streamed: eligible entries are read into
->   memory in chunks of `batch_size` and sent to GROBID straight from there — the archive is never fully decompressed and
+>   memory in chunks of `queue_size` and sent to GROBID straight from there — the archive is never fully decompressed and
 >   nothing but the results in `--output` ever touches the disk. If `--output` is omitted, results go to a directory named
 >   after the archive (e.g. `papers.zip` → `papers/`).
 > - **Glob patterns** (`paper.zip`, `paper*.zip`, `**/paper*.zip`, `**/*.pdf`, …) are expanded with `**` recursion; each
@@ -384,7 +384,7 @@ settings.
 ```json
 {
   "grobid_server": "http://localhost:8070",
-  "batch_size": 1000,
+  "queue_size": 1000,
   "sleep_time": 5,
   "timeout": 60,
   "coordinates": [
@@ -403,7 +403,7 @@ settings.
 | Parameter       | Description                                                                                                      | Default                 |
 |-----------------|------------------------------------------------------------------------------------------------------------------|-------------------------|
 | `grobid_server` | GROBID server URL                                                                                                | `http://localhost:8070` |
-| `batch_size`    | Thread pool size. **Tune carefully: a large batch size will result in the data being written less frequently**   | 1000                    |
+| `queue_size`    | Number of files queued per processing chunk. **Tune carefully: a large queue size will result in the data being written less frequently**   | 1000                    |
 | `sleep_time`    | Wait time when server is busy (seconds)                                                                          | 5                       |
 | `timeout`       | Client-side timeout (seconds)                                                                                    | 180                     |
 | `coordinates`   | XML elements for coordinate extraction                                                                           | See above               |

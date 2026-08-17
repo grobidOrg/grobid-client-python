@@ -91,7 +91,7 @@ class GrobidClient(ApiClient):
     # Default configuration values
     DEFAULT_CONFIG: dict = {
         'grobid_server': 'http://localhost:8070',
-        'batch_size': 10,
+        'queue_size': 10,
         'sleep_time': 5,
         'timeout': 180,
         'coordinates': [
@@ -121,7 +121,7 @@ class GrobidClient(ApiClient):
     def __init__(
             self,
             grobid_server: Optional[str] = None,
-            batch_size: Optional[int] = None,
+            queue_size: Optional[int] = None,
             coordinates: Optional[list] = None,
             sleep_time: Optional[int] = None,
             timeout: Optional[int] = None,
@@ -143,7 +143,7 @@ class GrobidClient(ApiClient):
         # This ensures CLI arguments override config file values
         self._set_config_params({
             'grobid_server': grobid_server,
-            'batch_size': batch_size,
+            'queue_size': queue_size,
             'coordinates': coordinates,
             'sleep_time': sleep_time,
             'timeout': timeout
@@ -328,6 +328,11 @@ class GrobidClient(ApiClient):
                 config_json = config_file.read()
                 # Update the default config with values from the file
                 file_config = json.loads(config_json)
+                if 'batch_size' in file_config:
+                    file_config.setdefault('queue_size', file_config.pop('batch_size'))
+                    temp_logger.warning(
+                        "Config key 'batch_size' is deprecated, use 'queue_size' instead"
+                    )
                 self.config.update(file_config)
                 temp_logger.info("Configuration file loaded successfully")
         except FileNotFoundError as e:
@@ -850,11 +855,11 @@ class GrobidClient(ApiClient):
             markdown_output: bool,
             skip_errors: bool = False
     ) -> Tuple[int, int, int]:
-        """Run process_batch over a list of files in chunks of batch_size.
+        """Run process_batch over a list of files in chunks of queue_size.
 
         Returns the aggregated (processed, errors, skipped) counts.
         """
-        batch_size_pdf = self.config["batch_size"]
+        queue_size = self.config["queue_size"]
         processed_files_count = 0
         errors_files_count = 0
         skipped_files_count = 0
@@ -870,7 +875,7 @@ class GrobidClient(ApiClient):
 
             batch.append(input_file)
 
-            if len(batch) == batch_size_pdf:
+            if len(batch) == queue_size:
                 batch_processed, batch_errors, batch_skipped = self.process_batch(
                     service, batch, input_path, output, n, generate_ids,
                     consolidate_header, consolidate_citations, include_raw_citations,
@@ -1057,7 +1062,7 @@ class GrobidClient(ApiClient):
         """Process the eligible files contained in a zip/tar archive.
 
         The archive is never fully decompressed: entries are read straight into
-        memory in chunks of ``batch_size`` (from the config) and each chunk is
+        memory in chunks of ``queue_size`` (from the config) and each chunk is
         sent to GROBID via ``process_batch``, so memory usage stays bounded by
         the chunk size and nothing but the results ever touches the disk. (The
         exception is ``processCitationList``, whose ``.txt`` inputs are read
@@ -1112,7 +1117,7 @@ class GrobidClient(ApiClient):
         Does not print the final summary (the caller does), so it can be
         aggregated with other inputs when resolving a glob pattern.
         """
-        batch_size_pdf = self.config["batch_size"]
+        queue_size = self.config["queue_size"]
 
         # Results must survive the temporary extraction directories, so when no
         # output is given we default to a directory named after the archive. For
@@ -1151,8 +1156,8 @@ class GrobidClient(ApiClient):
             # read straight from the archive into memory and posted from there.
             use_disk = service == 'processCitationList'
 
-            for chunk_start in range(0, total_files, batch_size_pdf):
-                chunk = eligible_members[chunk_start:chunk_start + batch_size_pdf]
+            for chunk_start in range(0, total_files, queue_size):
+                chunk = eligible_members[chunk_start:chunk_start + queue_size]
 
                 if not use_disk:
                     documents = []
@@ -1273,7 +1278,7 @@ class GrobidClient(ApiClient):
         if output is None:
             output = "."
 
-        batch_size_pdf = self.config["batch_size"]
+        queue_size = self.config["queue_size"]
         print(f"Found {total} remote file(s) to process")
         processed_count = 0
         error_count = 0
@@ -1284,8 +1289,8 @@ class GrobidClient(ApiClient):
         # fetched straight into memory and posted from there.
         use_disk = service == 'processCitationList'
 
-        for chunk_start in range(0, total, batch_size_pdf):
-            chunk = uris[chunk_start:chunk_start + batch_size_pdf]
+        for chunk_start in range(0, total, queue_size):
+            chunk = uris[chunk_start:chunk_start + queue_size]
 
             if not use_disk:
                 documents = []

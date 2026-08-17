@@ -22,7 +22,7 @@ class TestGrobidClientIntegration:
         # Create a temporary config file
         self.temp_config = {
             'grobid_server': self.test_server_url,
-            'batch_size': 10,
+            'queue_size': 10,
             'coordinates': ["persName", "figure"],
             'sleep_time': 2,
             'timeout': 30,
@@ -60,7 +60,7 @@ class TestGrobidClientIntegration:
 
         # Verify config was loaded
         assert client.config['grobid_server'] == self.test_server_url
-        assert client.config['batch_size'] == 10
+        assert client.config['queue_size'] == 10
         assert client.config['sleep_time'] == 2
         assert client.config['timeout'] == 30
 
@@ -91,14 +91,14 @@ class TestGrobidClientIntegration:
             with patch('grobid_client.grobid_client.GrobidClient._configure_logging'):
                 client = GrobidClient(
                     grobid_server='http://custom:9090',
-                    batch_size=500,
+                    queue_size=500,
                     config_path=self.config_file,
                     check_server=False
                 )
 
                 # Constructor values should override config file values (CLI precedence)
                 assert client.config['grobid_server'] == 'http://custom:9090'
-                assert client.config['batch_size'] == 500
+                assert client.config['queue_size'] == 500
 
     def test_logging_configuration(self):
         """Test logging configuration from config file."""
