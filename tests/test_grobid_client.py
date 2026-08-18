@@ -43,11 +43,23 @@ class TestGrobidClient:
         client = GrobidClient(check_server=False)
 
         assert client.config['grobid_server'] == 'http://localhost:8070'
-        assert client.config['queue_size'] == 10
+        assert client.config['queue_size'] is None
         assert client.config['sleep_time'] == 5
         assert client.config['timeout'] == 180
         assert 'persName' in client.config['coordinates']
         mock_configure_logging.assert_called_once()
+
+    @patch('grobid_client.grobid_client.GrobidClient._test_server_connection')
+    @patch('grobid_client.grobid_client.GrobidClient._configure_logging')
+    def test_effective_queue_size(self, mock_configure_logging, mock_test_server):
+        """Test that an unset queue_size defaults to the concurrency n."""
+        mock_test_server.return_value = (True, 200)
+
+        client = GrobidClient(check_server=False)
+        assert client._effective_queue_size(40) == 40
+
+        client.config['queue_size'] = 100
+        assert client._effective_queue_size(40) == 100
 
     @patch('grobid_client.grobid_client.GrobidClient._test_server_connection')
     @patch('grobid_client.grobid_client.GrobidClient._configure_logging')

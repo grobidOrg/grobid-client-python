@@ -403,7 +403,7 @@ settings.
 | Parameter       | Description                                                                                                      | Default                 |
 |-----------------|------------------------------------------------------------------------------------------------------------------|-------------------------|
 | `grobid_server` | GROBID server URL                                                                                                | `http://localhost:8070` |
-| `queue_size`    | Number of files queued per processing chunk. **Tune carefully: a large queue size will result in the data being written less frequently**   | 1000                    |
+| `queue_size`    | Number of files queued per processing chunk. If not set, it follows the concurrency `n` so the thread pool is never starved. **Tune carefully: a large queue size will result in the data being written less frequently, and on the archive/S3 paths a whole chunk is held in memory at once**   | same as `n`             |
 | `sleep_time`    | Wait time when server is busy (seconds)                                                                          | 5                       |
 | `timeout`       | Client-side timeout (seconds)                                                                                    | 180                     |
 | `coordinates`   | XML elements for coordinate extraction                                                                           | See above               |

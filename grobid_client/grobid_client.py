@@ -91,7 +91,9 @@ class GrobidClient(ApiClient):
     # Default configuration values
     DEFAULT_CONFIG: dict = {
         'grobid_server': 'http://localhost:8070',
-        'queue_size': 10,
+        # None means "follow the concurrency n at processing time", so the
+        # default queue never starves the thread pool
+        'queue_size': None,
         'sleep_time': 5,
         'timeout': 180,
         'coordinates': [
@@ -160,6 +162,14 @@ class GrobidClient(ApiClient):
         for key, value in params.items():
             if value is not None:
                 self.config[key] = value
+
+    def _effective_queue_size(self, n: int) -> int:
+        """Return the configured queue_size, defaulting to the concurrency n.
+
+        A queue smaller than the thread pool leaves workers idle, so when no
+        explicit value is configured the chunk size follows n.
+        """
+        return self.config.get("queue_size") or n
 
     def _warn_on_consolidation_timeout(self, consolidate_citations: bool) -> None:
         """Warn when citation consolidation is enabled with a low client timeout.
@@ -859,7 +869,7 @@ class GrobidClient(ApiClient):
 
         Returns the aggregated (processed, errors, skipped) counts.
         """
-        queue_size = self.config["queue_size"]
+        queue_size = self._effective_queue_size(n)
         processed_files_count = 0
         errors_files_count = 0
         skipped_files_count = 0
@@ -1117,7 +1127,7 @@ class GrobidClient(ApiClient):
         Does not print the final summary (the caller does), so it can be
         aggregated with other inputs when resolving a glob pattern.
         """
-        queue_size = self.config["queue_size"]
+        queue_size = self._effective_queue_size(n)
 
         # Results must survive the temporary extraction directories, so when no
         # output is given we default to a directory named after the archive. For
@@ -1278,7 +1288,7 @@ class GrobidClient(ApiClient):
         if output is None:
             output = "."
 
-        queue_size = self.config["queue_size"]
+        queue_size = self._effective_queue_size(n)
         print(f"Found {total} remote file(s) to process")
         processed_count = 0
         error_count = 0
