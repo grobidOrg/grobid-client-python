@@ -384,7 +384,6 @@ settings.
 ```json
 {
   "grobid_server": "http://localhost:8070",
-  "queue_size": 1000,
   "sleep_time": 5,
   "timeout": 60,
   "coordinates": [
@@ -403,7 +402,7 @@ settings.
 | Parameter       | Description                                                                                                      | Default                 |
 |-----------------|------------------------------------------------------------------------------------------------------------------|-------------------------|
 | `grobid_server` | GROBID server URL                                                                                                | `http://localhost:8070` |
-| `queue_size`    | Number of files queued per processing chunk. If not set, it follows the concurrency `n` so the thread pool is never starved. **Tune carefully: a large queue size will result in the data being written less frequently, and on the archive/S3 paths a whole chunk is held in memory at once**   | same as `n`             |
+| `queue_size`    | Number of files queued per processing chunk. See [Choosing a queue size](#choosing-a-queue-size). | 1000 for local directories, 1.2 × `n` for archives and S3 |
 | `sleep_time`    | Wait time when server is busy (seconds)                                                                          | 5                       |
 | `timeout`       | Client-side timeout (seconds)                                                                                    | 180                     |
 | `coordinates`   | XML elements for coordinate extraction                                                                           | See above               |
@@ -412,6 +411,24 @@ settings.
 > [!TIP]
 > Since version 0.0.12, the config file is optional. The client will use default localhost settings if no configuration
 > is provided.
+
+### Choosing a queue size
+
+`queue_size` controls how many files are grouped into one processing chunk. It is a memory/durability knob, not a
+concurrency one: parallelism toward the GROBID server is set by `-n`, and each chunk is processed `n` files at a time.
+When `queue_size` is not set, the client picks a sensible default per input type (see the table above); set it
+explicitly only if you need to override that. A few guidelines:
+
+- **Never set it below `n`.** Effective parallelism is `min(n, queue_size)`: a queue smaller than the thread pool
+  leaves workers idle. A bit of headroom above `n` (the default streaming value is 1.2 × `n`) keeps the pool busy.
+- **Results are written per chunk.** Output files land on disk only once a whole chunk has been processed, so a
+  larger queue means results are written less frequently and an interrupted run loses at most one chunk of work
+  (already-written results are skipped on re-run unless `--force` is used).
+- **Local PDF directories:** the queue holds only file paths, so large values are essentially free — the default is
+  1000. Lower it if you want results flushed to disk more often on long runs.
+- **Archives (zip/tar) and S3:** each chunk is read or downloaded *into memory* before processing starts, so peak RAM
+  grows with `queue_size × average file size`. Keep it moderate — the 1.2 × `n` default is a safe floor; going up to
+  a few multiples of `n` (e.g. 2–5 ×) trades memory for slightly better throughput around chunk boundaries.
 
 > [!WARNING]
 > **Citation consolidation and the `timeout` setting.** When `--consolidate_citations` (or `consolidate_citations=True`)

@@ -1,6 +1,5 @@
 {
   "grobid_server": "http://localhost:8070",
-  "queue_size": 1000,
   "timeout": 180,
   "sleep_time": 5,
   "coordinates": [

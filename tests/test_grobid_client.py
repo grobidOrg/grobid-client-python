@@ -52,14 +52,17 @@ class TestGrobidClient:
     @patch('grobid_client.grobid_client.GrobidClient._test_server_connection')
     @patch('grobid_client.grobid_client.GrobidClient._configure_logging')
     def test_effective_queue_size(self, mock_configure_logging, mock_test_server):
-        """Test that an unset queue_size defaults to the concurrency n."""
+        """Test the queue_size defaults: 1.2 * n for streaming, 1000 for local dirs."""
         mock_test_server.return_value = (True, 200)
 
         client = GrobidClient(check_server=False)
-        assert client._effective_queue_size(40) == 40
+        assert client._effective_queue_size(40) == 48
+        assert client._effective_queue_size(10) == 12
+        assert client._effective_queue_size(40, local_files=True) == 1000
 
         client.config['queue_size'] = 100
         assert client._effective_queue_size(40) == 100
+        assert client._effective_queue_size(40, local_files=True) == 100
 
     @patch('grobid_client.grobid_client.GrobidClient._test_server_connection')
     @patch('grobid_client.grobid_client.GrobidClient._configure_logging')

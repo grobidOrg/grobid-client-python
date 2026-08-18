@@ -16,6 +16,7 @@ which is not implemented for the moment.
 """
 from __future__ import annotations
 
+import math
 import os
 import io
 import json
@@ -163,13 +164,25 @@ class GrobidClient(ApiClient):
             if value is not None:
                 self.config[key] = value
 
-    def _effective_queue_size(self, n: int) -> int:
-        """Return the configured queue_size, defaulting to the concurrency n.
+    # Default chunk size when walking a local directory: only file paths are
+    # queued (nothing is pre-loaded), so a large chunk costs next to nothing.
+    LOCAL_DIR_QUEUE_SIZE = 1000
+
+    def _effective_queue_size(self, n: int, local_files: bool = False) -> int:
+        """Return the configured queue_size, or a default derived from n.
 
         A queue smaller than the thread pool leaves workers idle, so when no
-        explicit value is configured the chunk size follows n.
+        explicit value is configured the chunk size follows the concurrency n,
+        with 20% headroom to keep the pool busy around the chunk boundary. For
+        local directories, where the queue holds only file paths, a large
+        fixed default is used instead.
         """
-        return self.config.get("queue_size") or n
+        configured = self.config.get("queue_size")
+        if configured:
+            return configured
+        if local_files:
+            return self.LOCAL_DIR_QUEUE_SIZE
+        return math.ceil(n * 1.2)
 
     def _warn_on_consolidation_timeout(self, consolidate_citations: bool) -> None:
         """Warn when citation consolidation is enabled with a low client timeout.
@@ -869,7 +882,7 @@ class GrobidClient(ApiClient):
 
         Returns the aggregated (processed, errors, skipped) counts.
         """
-        queue_size = self._effective_queue_size(n)
+        queue_size = self._effective_queue_size(n, local_files=True)
         processed_files_count = 0
         errors_files_count = 0
         skipped_files_count = 0
