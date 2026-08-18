@@ -48,6 +48,7 @@ class ArchiveConversionStats:
     converted: int = 0
     failed: int = 0
     skipped: int = 0
+    empty: int = 0
 
 
 def is_tei_member(name: str) -> bool:
@@ -93,6 +94,24 @@ def default_queue_size(workers: int) -> int:
     return max(16, 4 * workers)
 
 
+def format_summary(stats: ArchiveConversionStats, source: str) -> str:
+    """The end-of-run summary, in the shape a calling script can parse.
+
+    One fact per line, each starting with its own word and leading with the
+    number, so `sed -n 's/^Errors: \\([0-9]*\\).*/\\1/p'` and friends keep
+    working. Batch scripts read these counts to decide what to do with the
+    archive they just converted.
+    """
+    lines = [f"Converted {stats.converted} of {stats.total} TEI file(s) from {source}"]
+    if stats.skipped:
+        lines.append(f"Skipped: {stats.skipped} (outputs already existed)")
+    if stats.empty:
+        lines.append(f"Empty: {stats.empty} (zero-length entries skipped)")
+    if stats.failed:
+        lines.append(f"Errors: {stats.failed}")
+    return "\n".join(lines)
+
+
 def convert_archive(
         archive_path: str,
         output_dir: Optional[str] = None,
@@ -116,6 +135,10 @@ def convert_archive(
         skip_existing: leave entries whose outputs are already there, so an
             interrupted run can be resumed
         verbose: log every entry as it is read
+
+    A zero-length entry is counted apart, as empty rather than failed: real
+    corpora carry a few of those, and nothing was written for them - there is
+    nothing to fix.
 
     Returns:
         What became of the entries. A document that cannot be converted is
@@ -238,6 +261,14 @@ def _read_entry(
 
     if entry is None:
         stats.failed += 1
+        return None
+
+    if not entry[1]:
+        # A zero-length entry is not a broken document, it is no document.
+        log.debug(f"{name} is empty, skipping")
+        stats.empty += 1
+        return None
+
     return entry
 
 
@@ -309,3 +340,80 @@ def _record(
 def looks_like_archive_input(path: Any) -> bool:
     """True when a --input value names an archive rather than a single document."""
     return isinstance(path, str) and looks_like_archive(path)
+
+
+def main() -> None:
+    """CLI: convert an archive of TEI to JSON, Markdown, or both at once.
+
+    The per-format CLIs (TEI2LossyJSON_cli, TEI2Markdown_cli) take an archive
+    too, but each parses the documents for itself. Asking for both formats here
+    parses each document once, which is most of the work.
+    """
+    import argparse
+    import logging
+    import sys
+
+    parser = argparse.ArgumentParser(
+        prog="python -m grobid_client.format.tei_archive",
+        description="Convert the TEI documents held in an archive, without unpacking it",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # both formats, one parse per document, 8 documents at a time
+  python -m grobid_client.format.tei_archive --input corpus.zip --output out/ \\
+      --json --markdown --workers 8
+
+  # a remote corpus, resumed where an interrupted run left off
+  python -m grobid_client.format.tei_archive --input s3://bucket/corpus.zip \\
+      --output out/ --markdown --skip-existing
+        """
+    )
+    parser.add_argument("--input", "-i", required=True,
+                        help="Archive of TEI files: zip or tar, local or s3:// (zip only)")
+    parser.add_argument("--output", "-o", default=None,
+                        help="Directory the conversions are written to "
+                             "(default: a directory named after the archive)")
+    parser.add_argument("--json", action="store_true", help="Write a .json per document")
+    parser.add_argument("--markdown", "--md", action="store_true",
+                        help="Write a .md per document")
+    parser.add_argument("--workers", "-w", type=int, default=None,
+                        help="Documents converted in parallel (default: one per core, "
+                             "up to %d). 1 converts in this process." % MAX_DEFAULT_WORKERS)
+    parser.add_argument("--queue-size", type=int, default=None,
+                        help="Documents held in memory at once (default: 4 per worker)")
+    parser.add_argument("--skip-existing", action="store_true",
+                        help="Leave entries whose output files already exist")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
+
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO if args.verbose else logging.WARNING,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+    if not args.json and not args.markdown:
+        parser.error("nothing to convert to: pass --json, --markdown, or both")
+
+    try:
+        stats = convert_archive(
+            args.input,
+            args.output,
+            json_output=args.json,
+            markdown_output=args.markdown,
+            workers=args.workers,
+            queue_size=args.queue_size,
+            skip_existing=args.skip_existing,
+            verbose=args.verbose,
+        )
+    except Exception as e:
+        logging.error(f"Could not read archive {args.input}: {str(e)}")
+        sys.exit(1)
+
+    print(format_summary(stats, args.input))
+    sys.exit(0 if stats.failed == 0 else 1)
+
+
+if __name__ == "__main__":
+    main()

@@ -17,6 +17,7 @@ from .TEI2Markdown import TEI2MarkdownConverter
 from .tei_archive import (
     MAX_DEFAULT_WORKERS,
     convert_archive,
+    format_summary,
     looks_like_archive_input,
 )
 from .tei_source import STDIN_ALIAS, TEISource, describe_source, resolve_cli_input
@@ -155,11 +156,7 @@ Examples:
             logging.error(f"Could not read archive {args.input}: {str(e)}")
             sys.exit(1)
 
-        print(f"Converted {stats.converted} of {stats.total} TEI file(s) from {args.input}")
-        if stats.skipped:
-            print(f"Skipped: {stats.skipped} (outputs already existed)")
-        if stats.failed:
-            print(f"Errors: {stats.failed}")
+        print(format_summary(stats, args.input))
         sys.exit(0 if stats.failed == 0 else 1)
 
     # A path has to be there to be converted; stdin only has to be readable,

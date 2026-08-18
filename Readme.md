@@ -422,6 +422,14 @@ Memory stays flat in the size of the archive: converting a 96 MB corpus of 800 T
 ~55 MB as a 24 MB corpus of 200. What sets that peak is the number of workers - a parsed document costs ten to fifty
 times its markup - and not how much is left to convert, which is what `--queue-size` bounds.
 
+Converting to both formats at once is worth a CLI of its own, because each per-format CLI parses the documents for
+itself:
+
+```bash
+# one parse per document, both formats out of it
+python -m grobid_client.format.tei_archive --input corpus.zip --output out/ --json --markdown --workers 8
+```
+
 The same thing from Python, for a caller that wants the counts back:
 
 ```python
@@ -432,6 +440,11 @@ print(stats.converted, "of", stats.total, "converted,", stats.failed, "failed")
 ```
 
 Asking for `json_output=True` and `markdown_output=True` together converts each document from a single parse.
+
+Zero-length entries are counted apart, as `stats.empty` rather than as failures - real corpora carry a few, and there is
+nothing to fix about them. The end-of-run summary prints one counted fact per line (`Converted N of M ...`,
+`Skipped: N`, `Empty: N`, `Errors: N`), so a batch script can read the counts back with `sed` and decide what to do with
+the archive it just converted.
 
 #### Converting from Python
 

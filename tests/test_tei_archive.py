@@ -186,6 +186,30 @@ class TestArchiveConversion:
         assert (stats.total, stats.converted, stats.failed) == (2, 1, 1)
         assert [p.name for p in out.iterdir()] == ["good.md"]
 
+    def test_an_empty_entry_is_counted_apart_from_a_failure(self, tmp_path, tei_bytes):
+        """Corpora carry a few zero-length files; nothing failed, nothing to fix."""
+        archive = make_zip(tmp_path / "corpus.zip", {
+            "good.tei.xml": tei_bytes,
+            "empty.tei.xml": b"",
+            "broken.tei.xml": b"<html/>",
+        })
+        out = tmp_path / "out"
+
+        stats = convert_archive(archive, str(out), markdown_output=True, workers=1)
+
+        assert (stats.total, stats.converted, stats.empty, stats.failed) == (3, 1, 1, 1)
+        assert [p.name for p in out.iterdir()] == ["good.md"]
+
+    def test_empty_entries_are_counted_apart_in_parallel_too(self, tmp_path, tei_bytes):
+        archive = make_zip(tmp_path / "corpus.zip", {
+            "a.tei.xml": tei_bytes, "b.tei.xml": b"", "c.tei.xml": tei_bytes,
+        })
+
+        stats = convert_archive(archive, str(tmp_path / "out"), markdown_output=True,
+                                workers=2, queue_size=2)
+
+        assert (stats.converted, stats.empty, stats.failed) == (2, 1, 0)
+
     def test_skip_existing_resumes_an_interrupted_run(self, tmp_path, tei_bytes):
         archive = make_zip(tmp_path / "corpus.zip",
                            {"a.tei.xml": tei_bytes, "b.tei.xml": tei_bytes})
@@ -274,6 +298,27 @@ class TestArchiveCLIs:
 
         assert result.returncode == 1
         assert "Errors: 1" in result.stdout
+
+    def test_one_pass_writes_both_formats(self, tmp_path, tei_bytes):
+        """The archive CLI parses each document once for both formats."""
+        archive = make_zip(tmp_path / "corpus.zip", {"a.tei.xml": tei_bytes})
+        out = tmp_path / "both"
+
+        result = self._run("grobid_client.format.tei_archive",
+                           "--input", archive, "--output", str(out),
+                           "--json", "--markdown", "--workers", "1")
+
+        assert result.returncode == 0, result.stderr
+        assert sorted(p.name for p in out.iterdir()) == ["a.json", "a.md"]
+
+    def test_the_archive_cli_needs_a_format(self, tmp_path, tei_bytes):
+        archive = make_zip(tmp_path / "corpus.zip", {"a.tei.xml": tei_bytes})
+
+        result = self._run("grobid_client.format.tei_archive",
+                           "--input", archive, "--output", str(tmp_path / "out"))
+
+        assert result.returncode != 0
+        assert "pass --json, --markdown, or both" in result.stderr
 
     def test_an_unreadable_archive_is_reported(self, tmp_path):
         result = self._run("grobid_client.format.TEI2Markdown_cli",
