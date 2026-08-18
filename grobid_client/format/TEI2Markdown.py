@@ -14,11 +14,12 @@ Markdown format with the following sections:
 from __future__ import annotations
 
 import re
-from pathlib import Path
-from typing import Any, List, Dict, Union, Optional, BinaryIO
+from typing import Any, List, Optional
 from bs4 import BeautifulSoup, NavigableString, Tag
 import logging
 import dateparser
+
+from .tei_source import TEISource, describe_source, load_tei_soup
 
 # Configure module-level logger
 logger = logging.getLogger(__name__)
@@ -33,31 +34,27 @@ class TEI2MarkdownConverter:
     def __init__(self) -> None:
         pass
 
-    def convert_tei_file(self, tei_file: Union[str, Path, BinaryIO]) -> Optional[str]:
-        """Convert a TEI file to Markdown format.
-        
+    def convert_tei_file(self, tei_file: TEISource) -> Optional[str]:
+        """Convert a TEI document to Markdown format.
+
         Args:
-            tei_file: Path to TEI file or file-like object
-            
+            tei_file: path to a TEI file, a stream over one, the TEI markup
+                itself (str or bytes), or a document already parsed into a
+                BeautifulSoup - see :func:`~.tei_source.load_tei_soup`
+
         Returns:
-            Markdown content as string, or None if conversion fails
+            Markdown content as string, or None if the document could not be
+            converted. Reading the source is the caller's problem though: an
+            unreadable path raises rather than passing for an unusable TEI.
         """
+        soup = load_tei_soup(tei_file)
+
+        if soup.TEI is None:
+            logger.warning("%s: The TEI file is not well-formed or empty. Skipping the file.",
+                           describe_source(tei_file))
+            return None
+
         try:
-            # Load with BeautifulSoup
-            if isinstance(tei_file, (str, Path)):
-                with open(tei_file, 'r', encoding='utf-8') as f:
-                    content = f.read()
-            else:
-                content = tei_file.read()
-                if isinstance(content, bytes):
-                    content = content.decode('utf-8')
-                
-            soup = BeautifulSoup(content, 'xml')
-
-            if soup.TEI is None:
-                logger.warning("The TEI file is not well-formed or empty. Skipping the file.")
-                return None
-
             markdown_sections = []
             
             # Extract title
@@ -109,9 +106,9 @@ class TEI2MarkdownConverter:
                 markdown_sections.append("\n")
             
             return "".join(markdown_sections)
-            
+
         except Exception as e:
-            logger.error(f"Error converting TEI to Markdown: {str(e)}")
+            logger.error("%s: Error converting TEI to Markdown: %s", describe_source(tei_file), str(e))
             return None
 
     def _extract_title(self, soup: BeautifulSoup) -> Optional[str]:
@@ -751,14 +748,15 @@ class TEI2MarkdownConverter:
 
 
 # Backwards compatible top-level function
-def convert_tei_file_to_markdown(tei_file: Union[str, Path, BinaryIO]) -> Optional[str]:
-    """Convert a TEI file to Markdown format.
-    
+def convert_tei_file_to_markdown(tei_file: TEISource) -> Optional[str]:
+    """Convert a TEI document to Markdown format.
+
     Args:
-        tei_file: Path to TEI file or file-like object
-        
+        tei_file: path to a TEI file, a stream over one, the TEI markup itself,
+            or a parsed BeautifulSoup
+
     Returns:
-        Markdown content as string, or None if conversion fails
+        Markdown content as string, or None if the document could not be converted
     """
     converter = TEI2MarkdownConverter()
     return converter.convert_tei_file(tei_file)

@@ -31,31 +31,16 @@ import requests
 import pathlib
 import logging
 import shutil
-import tarfile
 import tempfile
-import zipfile
 from typing import Any, BinaryIO, Callable, Optional, Tuple, Union
 import copy
 
+from . import archive as archive_streaming
+from . import fileio
 from .format.TEI2LossyJSON import TEI2LossyJSONConverter
+from .format.TEI2Markdown import TEI2MarkdownConverter
+from .format.tei_source import TEISource, load_tei_soup
 from .client import ApiClient
-
-
-def _default_file_mode() -> int:
-    """The mode open(..., 'w') would have produced, i.e. 0666 minus the umask.
-
-    tempfile.mkstemp hardcodes 0600, so files written through it and renamed
-    into place would end up private -- unreadable to the group on shared
-    scratch, where the outputs of a cluster run usually have to be. Read the
-    umask once here, at import, because querying it means temporarily setting
-    it and that is not safe to do from worker threads.
-    """
-    umask = os.umask(0o022)
-    os.umask(umask)
-    return 0o666 & ~umask
-
-
-_DEFAULT_FILE_MODE = _default_file_mode()
 
 
 class ServerUnavailableException(Exception):
@@ -73,9 +58,8 @@ class GrobidClient(ApiClient):
     CONSOLIDATE_CITATIONS_MIN_TIMEOUT = 120
 
     # Archive extensions that can be streamed entry-by-entry via --input instead
-    # of being fully decompressed first. Order matters: multi-dot suffixes must
-    # come before their single-dot prefixes when stripping (see _archive_stem).
-    ARCHIVE_EXTENSIONS = (".tar.gz", ".tar.bz2", ".tgz", ".tbz2", ".zip", ".tar")
+    # of being fully decompressed first.
+    ARCHIVE_EXTENSIONS = archive_streaming.ARCHIVE_EXTENSIONS
 
     # Suffix of the TEI result files, and the naming of the error files written
     # next to them when a document fails (e.g. paper_500.txt). The latter is what
@@ -460,53 +444,12 @@ class GrobidClient(ApiClient):
         return str(filename)
 
     def _write_atomic(self, filename: str, text: str) -> None:
-        """Write text to filename via a temp file in the same directory, then os.replace.
-
-        A killed process must never leave a partial output behind. process_batch
-        decides a document is already done with os.path.isfile() alone, so a TEI
-        truncated by an OOM kill or a wall-clock timeout is indistinguishable
-        from a complete one and is skipped on every subsequent run -- the
-        corruption is permanent and silent. Writing to a temp file and renaming
-        means the destination either does not exist or is the whole document.
-
-        The temp file goes in the DESTINATION directory, not TMPDIR: os.replace
-        is only atomic within a filesystem, and on a cluster TMPDIR is usually a
-        different mount. The "." prefix and ".tmp" suffix keep the temp file from
-        matching *.grobid.tei.xml or *_[0-9]*.txt, so output counting is
-        unaffected while a write is in flight.
-
-        Residual risk: a SIGKILL between mkstemp and replace leaks a temp file.
-        That is visible and harmless, unlike a truncated TEI.
-        """
-        dest = pathlib.Path(os.path.expanduser(filename))
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        # mkstemp names are unique, so concurrent writers from the
-        # ThreadPoolExecutor cannot collide on the temp path.
-        fd, tmp_path = tempfile.mkstemp(dir=str(dest.parent), prefix=".", suffix=".tmp")
-        try:
-            tmp_file = os.fdopen(fd, "w", encoding="utf8")
-        except BaseException:
-            # fdopen did not take ownership of fd, so we still have to close it.
-            # Past this point the file object owns it and closing it here too
-            # could close an unrelated descriptor that reused the number.
-            os.close(fd)
-            self._unlink_quietly(tmp_path)
-            raise
-        try:
-            with tmp_file:
-                tmp_file.write(text)
-            os.chmod(tmp_path, _DEFAULT_FILE_MODE)   # mkstemp gives 0600
-            os.replace(tmp_path, str(dest))
-        except BaseException:
-            self._unlink_quietly(tmp_path)
-            raise
+        """Write text to filename whole, or not at all (see fileio.write_atomic)."""
+        fileio.write_atomic(filename, text)
 
     @staticmethod
     def _unlink_quietly(path: str) -> None:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
+        fileio.unlink_quietly(path)
 
     def _error_file_name(self, tei_filename: str, status: int) -> str:
         """Name of the error file recording a failed processing of a document."""
@@ -761,27 +704,19 @@ class GrobidClient(ApiClient):
     @staticmethod
     def _is_s3(path: Any) -> bool:
         """Return True if path is an s3:// URI."""
-        return isinstance(path, str) and path.startswith("s3://")
+        return archive_streaming.is_s3(path)
 
     @staticmethod
     def _split_s3(uri: str) -> Tuple[str, str]:
         """Split an s3://bucket/key URI into (bucket, key)."""
-        bucket, _, key = uri[len("s3://"):].partition("/")
-        return bucket, key
+        return archive_streaming.split_s3(uri)
 
     def _s3_basename(self, uri: str) -> str:
         """Return the last path component of an s3:// key."""
-        return self._split_s3(uri)[1].rsplit("/", 1)[-1]
+        return archive_streaming.s3_basename(uri)
 
     def _import_smart_open(self) -> Any:
-        try:
-            import smart_open  # noqa: F401
-            return smart_open
-        except ImportError as e:
-            raise ImportError(
-                "Reading from s3:// requires the optional 's3' extra. "
-                "Install it with: pip install grobid-client-python[s3]"
-            ) from e
+        return archive_streaming.import_smart_open()
 
     def _import_boto3(self) -> Any:
         try:
@@ -799,7 +734,7 @@ class GrobidClient(ApiClient):
         The returned stream lets zipfile read only the central directory and the
         requested entries, so a remote zip is never fully downloaded.
         """
-        return self._import_smart_open().open(uri, "rb")
+        return archive_streaming.s3_open(uri)
 
     def _resolve_s3_paths(self, uri: str) -> list:
         """Resolve an s3:// object/prefix/glob into a sorted list of object URIs.
@@ -939,20 +874,15 @@ class GrobidClient(ApiClient):
 
     def _looks_like_archive(self, path: str) -> bool:
         """Return True if the path/URI name has a known archive extension."""
-        lower = path.lower()
-        return any(lower.endswith(ext) for ext in self.ARCHIVE_EXTENSIONS)
+        return archive_streaming.looks_like_archive(path)
 
     def _is_archive(self, path: str) -> bool:
         """Return True if path is an existing local zip/tar archive file."""
-        return os.path.isfile(path) and self._looks_like_archive(path)
+        return archive_streaming.is_archive(path)
 
     def _archive_stem(self, path: str) -> str:
         """Strip a known archive extension from path (e.g. docs.tar.gz -> docs)."""
-        lower = path.lower()
-        for ext in self.ARCHIVE_EXTENSIONS:
-            if lower.endswith(ext):
-                return path[:-len(ext)]
-        return os.path.splitext(path)[0]
+        return archive_streaming.archive_stem(path)
 
     def _safe_member_path(self, dest_dir: str, arcname: str) -> Optional[str]:
         """Resolve an archive entry name to a safe path under dest_dir.
@@ -961,106 +891,11 @@ class GrobidClient(ApiClient):
         prevent path-traversal ("zip slip") outside of dest_dir. Returns None
         if the entry name has no usable path component.
         """
-        normalized = arcname.replace("\\", "/")
-        parts = [p for p in normalized.split("/") if p not in ("", ".", "..")]
-        if not parts:
-            return None
-        return os.path.join(dest_dir, *parts)
+        return archive_streaming.safe_member_path(dest_dir, arcname)
 
-    def _open_archive(self, archive_path: str) -> Tuple[str, Any, list]:
-        """Open a zip/tar archive and return (kind, handle, member_names).
-
-        member_names contains only regular files (directories are skipped).
-        For s3:// zips the archive is range-streamed (not fully downloaded); the
-        underlying stream is stashed on the handle so the caller can close it.
-
-        The handle is a ZipFile or a TarFile, which share no common interface
-        here: which one it is, is what the returned "kind" tag is for, and it is
-        the tag - not the type - that the callers dispatch on.
-        """
-        archive: Any
-        if self._is_s3(archive_path):
-            if not archive_path.lower().endswith(".zip"):
-                raise ValueError(
-                    f"Only .zip archives can be range-streamed over s3://: {archive_path}"
-                )
-            stream = self._s3_open(archive_path)
-            archive = zipfile.ZipFile(stream)
-            archive._grobid_stream = stream  # closed by _process_archive_core
-            names = [n for n in archive.namelist() if not n.endswith("/")]
-            return "zip", archive, names
-
-        if archive_path.lower().endswith(".zip"):
-            archive = zipfile.ZipFile(archive_path)
-            names = [n for n in archive.namelist() if not n.endswith("/")]
-            return "zip", archive, names
-
-        archive = tarfile.open(archive_path, "r:*")
-        names = [m.name for m in archive.getmembers() if m.isfile()]
-        return "tar", archive, names
-
-    def _extract_archive_member(
-            self,
-            kind: str,
-            archive: Any,
-            member_name: str,
-            dest_dir: str
-    ) -> Optional[str]:
-        """Stream a single archive entry to dest_dir, preserving its relative path.
-
-        Returns the path of the extracted file, or None if it was skipped.
-        """
-        target = self._safe_member_path(dest_dir, member_name)
-        if target is None:
-            self.logger.warning(f"Skipping archive entry with unsafe path: {member_name}")
-            return None
-
-        parent = os.path.dirname(target)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-
-        if kind == "zip":
-            source = archive.open(member_name)
-        else:
-            source = archive.extractfile(archive.getmember(member_name))
-            if source is None:
-                return None
-
-        try:
-            with open(target, "wb") as out_file:
-                shutil.copyfileobj(source, out_file)
-        finally:
-            source.close()
-
-        return target
-
-    def _read_archive_member(self, kind: str, archive: Any, member_name: str) -> Optional[BinaryIO]:
-        """Read a single archive entry into memory as a named document.
-
-        The entry never touches the disk: it goes straight from the archive to
-        process_pdf, which accepts a named stream. The stream is named after the
-        entry (sanitized the same way extraction is), and that name is what the
-        output file is derived from. Returns None if the entry is unusable.
-        """
-        name = self._safe_member_path("", member_name)
-        if name is None:
-            self.logger.warning(f"Skipping archive entry with unsafe path: {member_name}")
-            return None
-
-        if kind == "zip":
-            source = archive.open(member_name)
-        else:
-            source = archive.extractfile(archive.getmember(member_name))
-            if source is None:
-                return None
-
-        try:
-            document = io.BytesIO(source.read())
-        finally:
-            source.close()
-
-        document.name = name
-        return document
+    def _open_archive(self, archive_path: str) -> archive_streaming.ArchiveReader:
+        """Open a zip/tar archive (local or s3://) for entry-by-entry reading."""
+        return archive_streaming.ArchiveReader(archive_path, log=self.logger)
 
     def process_archive(
             self,
@@ -1152,7 +987,7 @@ class GrobidClient(ApiClient):
                 output = self._archive_stem(archive_path)
 
         try:
-            kind, archive, member_names = self._open_archive(archive_path)
+            archive = self._open_archive(archive_path)
         except Exception as e:
             self.logger.error(f"Could not open archive {archive_path}: {str(e)}")
             return 0, 0, 0, 0
@@ -1164,7 +999,7 @@ class GrobidClient(ApiClient):
 
         try:
             eligible_members = [
-                name for name in member_names
+                name for name in archive.names
                 if self._is_eligible_input(os.path.basename(name), service)
             ]
             total_files = len(eligible_members)
@@ -1187,7 +1022,7 @@ class GrobidClient(ApiClient):
                     for member_name in chunk:
                         if verbose:
                             self.logger.info(f"Reading {member_name} from {archive_path}")
-                        document = self._read_archive_member(kind, archive, member_name)
+                        document = archive.read_member(member_name)
                         if document is not None:
                             documents.append(document)
 
@@ -1225,7 +1060,7 @@ class GrobidClient(ApiClient):
                     for member_name in chunk:
                         if verbose:
                             self.logger.info(f"Extracting {member_name} from {archive_path}")
-                        extracted = self._extract_archive_member(kind, archive, member_name, temp_dir)
+                        extracted = archive.extract_member(member_name, temp_dir)
                         if extracted is not None:
                             extracted_files.append(extracted)
 
@@ -1258,13 +1093,7 @@ class GrobidClient(ApiClient):
                 finally:
                     shutil.rmtree(temp_dir, ignore_errors=True)
         finally:
-            try:
-                archive.close()
-            finally:
-                # ZipFile does not close a file object we passed in (the s3 stream)
-                stream = getattr(archive, "_grobid_stream", None)
-                if stream is not None:
-                    stream.close()
+            archive.close()
 
         return total_files, processed_files_count, errors_files_count, skipped_files_count
 
@@ -1450,46 +1279,12 @@ class GrobidClient(ApiClient):
                         f"{filename} already exists, skipping... (use --force to reprocess pdf input files)")
                     skipped_count += 1
 
-                    # Check if JSON output is needed but JSON file doesn't exist
-                    if json_output:
-                        json_filename = filename.replace('.grobid.tei.xml', '.json')
-                        # Expand ~ to home directory before checking file existence
-                        json_filename_expanded = os.path.expanduser(json_filename)
-                        if not os.path.isfile(json_filename_expanded):
-                            self.logger.info(f"JSON file {json_filename} does not exist, generating JSON from existing TEI...")
-                            try:
-                                converter: Any = TEI2LossyJSONConverter()
-                                json_data = converter.convert_tei_file(filename, stream=False)
-
-                                if json_data:
-                                    self._write_atomic(
-                                        json_filename_expanded,
-                                        json.dumps(json_data, indent=2, ensure_ascii=False))
-                                    self.logger.debug(f"Successfully created JSON file: {json_filename_expanded}")
-                                else:
-                                    self.logger.warning(f"Failed to convert TEI to JSON for {filename}")
-                            except Exception as e:
-                                self.logger.error(f"Failed to convert TEI to JSON for {filename}: {str(e)}")
-
-                    # Check if Markdown output is needed but Markdown file doesn't exist
-                    if markdown_output:
-                        markdown_filename = filename.replace('.grobid.tei.xml', '.md')
-                        # Expand ~ to home directory before checking file existence
-                        markdown_filename_expanded = os.path.expanduser(markdown_filename)
-                        if not os.path.isfile(markdown_filename_expanded):
-                            self.logger.info(f"Markdown file {markdown_filename} does not exist, generating Markdown from existing TEI...")
-                            try:
-                                from .format.TEI2Markdown import TEI2MarkdownConverter
-                                converter = TEI2MarkdownConverter()
-                                markdown_data = converter.convert_tei_file(filename)
-
-                                if markdown_data:
-                                    self._write_atomic(markdown_filename_expanded, markdown_data)
-                                    self.logger.debug(f"Successfully created Markdown file: {markdown_filename_expanded}")
-                                else:
-                                    self.logger.warning(f"Failed to convert TEI to Markdown for {filename}")
-                            except Exception as e:
-                                self.logger.error(f"Failed to convert TEI to Markdown for {filename}: {str(e)}")
+                    # The TEI is on disk and stays there, but the renderings
+                    # asked for may be missing - a previous run without --json
+                    # or --markdown, or a conversion that failed back then.
+                    self._write_converted_outputs(
+                        os.path.expanduser(filename), filename,
+                        json_output, markdown_output, only_missing=True)
 
                     continue
 
@@ -1559,43 +1354,11 @@ class GrobidClient(ApiClient):
                     self._remove_error_files(filename)
 
 
-                    # Convert to JSON if requested
-                    if json_output:
-                        try:
-                            converter = TEI2LossyJSONConverter()
-                            json_data = converter.convert_tei_file(filename, stream=False)
-                            
-                            if json_data:
-                                json_filename = filename.replace('.grobid.tei.xml', '.json')
-                                # Always write JSON file when TEI is written (respects --force behavior)
-                                json_filename_expanded = os.path.expanduser(json_filename)
-                                self._write_atomic(
-                                    json_filename_expanded,
-                                    json.dumps(json_data, indent=2, ensure_ascii=False))
-                                self.logger.debug(f"Successfully wrote JSON file: {json_filename_expanded}")
-                            else:
-                                self.logger.warning(f"Failed to convert TEI to JSON for {filename}")
-                        except Exception as e:
-                            self.logger.error(f"Failed to convert TEI to JSON for {filename}: {str(e)}")
-                    
-                    # Convert to Markdown if requested
-                    if markdown_output:
-                        try:
-                            from .format.TEI2Markdown import TEI2MarkdownConverter
-                            converter = TEI2MarkdownConverter()
-                            markdown_data = converter.convert_tei_file(filename)
+                    # The TEI has just come back from the server and is still
+                    # in memory: convert from there rather than reading back
+                    # what we have only now written out.
+                    self._write_converted_outputs(text, filename, json_output, markdown_output)
 
-                            if markdown_data is not None:
-                                markdown_filename = filename.replace('.grobid.tei.xml', '.md')
-                                # Always write Markdown file when TEI is written (respects --force behavior)
-                                markdown_filename_expanded = os.path.expanduser(markdown_filename)
-                                self._write_atomic(markdown_filename_expanded, markdown_data)
-                                self.logger.debug(f"Successfully wrote Markdown file: {markdown_filename_expanded}")
-                            else:
-                                self.logger.warning(f"Failed to convert TEI to Markdown for {filename}")
-                        except Exception as e:
-                            self.logger.error(f"Failed to convert TEI to Markdown for {filename}: {str(e)}")
-                            
                 except OSError as e:
                     self.logger.error(f"Failed to write TEI XML file {filename}: {str(e)}")
 
@@ -1610,6 +1373,73 @@ class GrobidClient(ApiClient):
             self.logger.info(f" Throughput: {batch_seconds_per_docs:.2f} seconds/document")
 
         return processed_count, error_count, skipped_count
+
+    def _write_converted_outputs(
+            self,
+            tei_source: TEISource,
+            tei_filename: str,
+            json_output: bool,
+            markdown_output: bool,
+            only_missing: bool = False
+    ) -> None:
+        """Write the JSON and/or Markdown renderings of a TEI document.
+
+        ``tei_source`` is the TEI itself whenever we still have it in memory -
+        it has just come back from the server - and the path it was written to
+        otherwise. Either way it is parsed once and the parsed document is
+        shared by both converters, which never modify it: asking for --json and
+        --markdown together costs one parse, not two, and none of them costs a
+        read back of a file this process has just written.
+
+        With ``only_missing``, a rendering that is already on disk is left
+        alone. That is the case of a document whose TEI was not reprocessed.
+        """
+        json_filename = os.path.expanduser(tei_filename.replace('.grobid.tei.xml', '.json'))
+        markdown_filename = os.path.expanduser(tei_filename.replace('.grobid.tei.xml', '.md'))
+
+        write_json = json_output and not (only_missing and os.path.isfile(json_filename))
+        write_markdown = markdown_output and not (only_missing and os.path.isfile(markdown_filename))
+
+        if not write_json and not write_markdown:
+            return
+
+        try:
+            # Parsing is by far the expensive part of a conversion, so it
+            # happens here rather than once per converter.
+            tei = load_tei_soup(tei_source)
+        except Exception as e:
+            self.logger.error(f"Failed to read TEI {tei_filename}: {str(e)}")
+            return
+
+        if write_json:
+            if only_missing:
+                self.logger.info(
+                    f"JSON file {json_filename} does not exist, generating JSON from existing TEI...")
+            try:
+                json_data = TEI2LossyJSONConverter().convert_tei_file(tei, stream=False)
+
+                if json_data:
+                    self._write_atomic(json_filename, json.dumps(json_data, indent=2, ensure_ascii=False))
+                    self.logger.debug(f"Successfully wrote JSON file: {json_filename}")
+                else:
+                    self.logger.warning(f"Failed to convert TEI to JSON for {tei_filename}")
+            except Exception as e:
+                self.logger.error(f"Failed to convert TEI to JSON for {tei_filename}: {str(e)}")
+
+        if write_markdown:
+            if only_missing:
+                self.logger.info(
+                    f"Markdown file {markdown_filename} does not exist, generating Markdown from existing TEI...")
+            try:
+                markdown_data = TEI2MarkdownConverter().convert_tei_file(tei)
+
+                if markdown_data is not None:
+                    self._write_atomic(markdown_filename, markdown_data)
+                    self.logger.debug(f"Successfully wrote Markdown file: {markdown_filename}")
+                else:
+                    self.logger.warning(f"Failed to convert TEI to Markdown for {tei_filename}")
+            except Exception as e:
+                self.logger.error(f"Failed to convert TEI to Markdown for {tei_filename}: {str(e)}")
 
     def process_pdf(
             self,

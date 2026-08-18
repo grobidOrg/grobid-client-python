@@ -1,6 +1,7 @@
 """
 Unit tests for TEI to JSON and TEI to Markdown conversion functionality.
 """
+import json
 import os
 import tempfile
 from unittest.mock import Mock, patch
@@ -949,3 +950,60 @@ class TestTEIConversions:
             assert stream_p.get('text') == non_stream_p.get('text'), \
                 f"Passage {i} text mismatch between stream and non-stream modes"
 
+
+
+class TestClientSideConversion:
+    """The client converts the TEI it already holds, rather than reading it back."""
+
+    def setup_method(self):
+        with patch('grobid_client.grobid_client.GrobidClient._test_server_connection',
+                   return_value=(True, 200)), \
+                patch('grobid_client.grobid_client.GrobidClient._configure_logging'):
+            self.client = GrobidClient(check_server=False)
+        self.client.logger = Mock()
+
+        with open(os.path.join(TEST_DATA_PATH, '0046d83a-edd6-4631-b57c-755cdcce8b7f.tei.xml'),
+                  encoding='utf-8') as tei_file:
+            self.tei = tei_file.read()
+
+    def test_conversion_from_memory_needs_no_tei_on_disk(self, temp_dir):
+        """The TEI comes back from the server in memory: that is what gets converted."""
+        tei_filename = os.path.join(temp_dir, 'doc.grobid.tei.xml')
+
+        self.client._write_converted_outputs(self.tei, tei_filename, True, True)
+
+        assert sorted(os.listdir(temp_dir)) == ['doc.json', 'doc.md']
+        with open(os.path.join(temp_dir, 'doc.json'), encoding='utf-8') as json_file:
+            assert json.load(json_file)['biblio']['title']
+        assert os.path.getsize(os.path.join(temp_dir, 'doc.md')) > 0
+
+    def test_only_missing_fills_the_gaps_and_leaves_the_rest_alone(self, temp_dir):
+        tei_filename = os.path.join(temp_dir, 'doc.grobid.tei.xml')
+        with open(tei_filename, 'w', encoding='utf-8') as tei_file:
+            tei_file.write(self.tei)
+        with open(os.path.join(temp_dir, 'doc.json'), 'w', encoding='utf-8') as json_file:
+            json_file.write('{"kept": true}')
+
+        self.client._write_converted_outputs(
+            tei_filename, tei_filename, True, True, only_missing=True)
+
+        with open(os.path.join(temp_dir, 'doc.json'), encoding='utf-8') as json_file:
+            assert json.load(json_file) == {"kept": True}
+        assert os.path.getsize(os.path.join(temp_dir, 'doc.md')) > 0
+
+    def test_nothing_asked_for_is_nothing_read(self, temp_dir):
+        tei_filename = os.path.join(temp_dir, 'doc.grobid.tei.xml')
+
+        self.client._write_converted_outputs('/nonexistent/doc.grobid.tei.xml', tei_filename,
+                                             False, False)
+
+        assert os.listdir(temp_dir) == []
+
+    def test_an_unreadable_tei_is_reported_and_not_raised(self, temp_dir):
+        tei_filename = os.path.join(temp_dir, 'doc.grobid.tei.xml')
+
+        self.client._write_converted_outputs('/nonexistent/doc.grobid.tei.xml', tei_filename,
+                                             True, True)
+
+        assert os.listdir(temp_dir) == []
+        assert self.client.logger.error.called

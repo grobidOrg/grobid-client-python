@@ -178,3 +178,41 @@ def test_missing_extra_raises_helpful_error():
     with patch.dict("sys.modules", {"smart_open": None}):
         with pytest.raises(ImportError, match=r"pip install grobid-client-python\[s3\]"):
             c._s3_open("s3://bucket/key.zip")
+
+
+@mock_aws
+def test_convert_a_remote_zip_of_tei_without_downloading_it(tmp_path):
+    """A corpus of TEI in S3 is converted straight out of the range-streamed zip."""
+    from pathlib import Path
+
+    from grobid_client.format.tei_archive import convert_archive
+    from tests.resources import TEST_DATA_PATH
+
+    tei = (Path(TEST_DATA_PATH) / "0046d83a-edd6-4631-b57c-755cdcce8b7f.tei.xml").read_bytes()
+    s3 = boto3.client("s3", region_name=REGION)
+    s3.create_bucket(Bucket=BUCKET)
+    s3.put_object(Bucket=BUCKET, Key="arch/corpus.zip", Body=_zip_bytes({
+        "0000001.tei.xml": tei,
+        "sub/0000002.grobid.tei.xml": tei,
+        "note.txt": b"not a TEI",
+    }))
+
+    out = tmp_path / "out"
+    stats = convert_archive(f"s3://{BUCKET}/arch/corpus.zip", str(out),
+                            json_output=True, markdown_output=True, workers=1)
+
+    assert (stats.total, stats.converted, stats.failed) == (2, 2, 0)
+    assert sorted(p.name for p in out.iterdir()) == [
+        "0000001.json", "0000001.md", "0000002.json", "0000002.md",
+    ]
+    # the archive itself never landed on disk
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["out"]
+
+
+@mock_aws
+def test_converting_a_remote_zip_needs_the_s3_extra():
+    from grobid_client.format.tei_archive import convert_archive
+
+    with patch.dict("sys.modules", {"smart_open": None}):
+        with pytest.raises(ImportError, match=r"pip install grobid-client-python\[s3\]"):
+            convert_archive("s3://bucket/corpus.zip", "out", markdown_output=True)

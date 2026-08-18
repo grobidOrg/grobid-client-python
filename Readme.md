@@ -373,6 +373,102 @@ Converts TEI XML files to Markdown format (similar to `--markdown` option).
 python -m grobid_client.format.TEI2Markdown_cli --input path/to/file.tei.xml --output path/to/output.md
 ```
 
+#### Reading the TEI from a stream
+
+Both converters read from stdin when `--input` is left out (or given as `-`), so they can sit in a pipe instead of only
+at the end of one - handy when the TEI comes from somewhere else than the filesystem and would otherwise have to be
+written out just to be read back:
+
+```bash
+# Convert a TEI that never touches the disk
+curl -s https://example.org/paper.tei.xml | python -m grobid_client.format.TEI2Markdown_cli > paper.md
+
+# Convert one entry of an archive
+unzip -p corpus.zip paper.tei.xml | python -m grobid_client.format.TEI2LossyJSON_cli -o paper.json
+```
+
+#### Converting an archive of TEI files
+
+A corpus usually travels as one zip or tarball, and there is no reason for the TEI inside it to touch the disk on its
+way to Markdown or JSON. Point `--input` at the archive and the entries are read into memory one by one, converted
+there, and only the results are written - the same principle the client applies to PDFs on their way to GROBID, with
+more room to work in, since a TEI is a fraction of the size of the PDF it came from:
+
+```bash
+# every TEI in the archive, converted into markdown/
+python -m grobid_client.format.TEI2Markdown_cli --input corpus.zip --output markdown/
+
+# a remote corpus, range-streamed: only the entries actually converted cross the network
+python -m grobid_client.format.TEI2LossyJSON_cli --input s3://bucket/corpus.zip --output json/
+
+# resume an interrupted run, on 4 processes
+python -m grobid_client.format.TEI2Markdown_cli --input corpus.tar.gz --output markdown/ \
+    --workers 4 --skip-existing
+```
+
+Zip and tar archives (`.zip`, `.tar`, `.tar.gz`, `.tgz`, `.tar.bz2`, `.tbz2`) are read locally; `s3://` supports zip,
+which is range-streamed and never downloaded whole (needs the `s3` extra). Entries named `*.tei.xml`,
+`*.grobid.tei.xml`, `*.tei` or `*.xml` are converted; anything else in the archive is left alone. Outputs are named
+after the entry and written flat into `--output`, which defaults to a directory named after the archive
+(`corpus.zip` -> `corpus/`). A document that cannot be converted is reported and counted, and the run carries on.
+
+| Option | What it does |
+|--------|--------------|
+| `--workers`, `-w` | Documents converted in parallel (default: one per core, up to 8). `1` converts in-process. |
+| `--queue-size` | Documents held in memory at once, waiting for a worker (default: 4 per worker). |
+| `--skip-existing` | Leave entries whose outputs are already there, so an interrupted run can be resumed. |
+
+Memory stays flat in the size of the archive: converting a 96 MB corpus of 800 TEI files on 4 workers peaks at the same
+~55 MB as a 24 MB corpus of 200. What sets that peak is the number of workers - a parsed document costs ten to fifty
+times its markup - and not how much is left to convert, which is what `--queue-size` bounds.
+
+The same thing from Python, for a caller that wants the counts back:
+
+```python
+from grobid_client.format.tei_archive import convert_archive
+
+stats = convert_archive("corpus.zip", "markdown/", markdown_output=True, workers=4)
+print(stats.converted, "of", stats.total, "converted,", stats.failed, "failed")
+```
+
+Asking for `json_output=True` and `markdown_output=True` together converts each document from a single parse.
+
+#### Converting from Python
+
+Both converters take their input from wherever it is: a path, a stream over the document, the TEI markup itself, or a
+document parsed once and reused. The `stream=True` mode of the JSON converter yields passages one at a time instead of
+building the whole document - the TEI is still parsed in full first, so this bounds what the *caller* accumulates, not
+what the parser does.
+
+```python
+import io
+from grobid_client.format.TEI2LossyJSON import TEI2LossyJSONConverter
+from grobid_client.format.TEI2Markdown import TEI2MarkdownConverter
+from grobid_client.format.tei_source import load_tei_soup
+
+json_converter = TEI2LossyJSONConverter()
+markdown_converter = TEI2MarkdownConverter()
+
+# a path, a stream, or the markup itself - a TEI just back from the server, say
+json_converter.convert_tei_file("paper.grobid.tei.xml")
+json_converter.convert_tei_file(io.BytesIO(tei_bytes))
+markdown_converter.convert_tei_file(tei_xml_string)
+
+# converting one document to both formats: parse it once and hand it over twice
+tei = load_tei_soup("paper.grobid.tei.xml")
+document = json_converter.convert_tei_file(tei)
+markdown = markdown_converter.convert_tei_file(tei)
+
+# passage by passage, for documents too large to hold as one dict
+for passage in json_converter.convert_tei_file("paper.grobid.tei.xml", stream=True):
+    print(passage["text"])
+```
+
+The converters return `None` for a document that is not a usable TEI, and raise for a source they cannot read at all -
+a missing file is not a broken TEI. Markup read from disk or from a binary stream is decoded following the encoding
+declared in its XML prolog rather than an assumed UTF-8, so a TEI that is not UTF-8 (Pub2TEI output, for one) converts
+intact.
+
 
 ## ⚙️ Configuration
 
@@ -690,6 +786,11 @@ client.process(
 
 > [!NOTE]
 > When using `--markdown`, the `--force` flag only checks for existing TEI files. If a TEI file is rewritten (due to `--force`), the corresponding Markdown file is automatically rewritten as well.
+
+> [!NOTE]
+> `--json` and `--markdown` convert the TEI as it comes back from the server, without reading back the file that has
+> just been written, and asking for both costs one parse rather than two. A document whose TEI is already on disk and is
+> being skipped is the exception: there the TEI is read from disk, and only the renderings that are missing are written.
 
 ### Header Document Processing
 

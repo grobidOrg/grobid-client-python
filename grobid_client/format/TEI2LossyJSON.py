@@ -14,10 +14,12 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import html
 import re
 from pathlib import Path
-from typing import Any, Dict, Union, BinaryIO, Iterator
+from typing import Any, Dict, Union, Iterator
 
 import dateparser
 from bs4 import BeautifulSoup, Tag
+
+from .tei_source import TEISource, describe_source, load_tei_soup
 
 # Configure module-level logger
 logger: logging.Logger = logging.getLogger(__name__)
@@ -40,24 +42,27 @@ class TEI2LossyJSONConverter:
     def __init__(self, validate_refs: bool = True) -> None:
         self.validate_refs: bool = validate_refs
 
-    def convert_tei_file(self, tei_file: Union[str, Path, BinaryIO], stream: bool = False) -> Any:
-        """Backward-compatible function. If stream=True returns a generator that yields passages (dicts).
-        If stream=False returns the full document dict (same shape as original function).
+    def convert_tei_file(self, tei_file: TEISource, stream: bool = False) -> Any:
+        """Convert a TEI document to the working JSON format.
+
+        Args:
+            tei_file: path to a TEI file, a stream over one, the TEI markup
+                itself (str or bytes), or a document already parsed into a
+                BeautifulSoup - see :func:`~.tei_source.load_tei_soup`
+            stream: yield passages one by one instead of building the whole
+                document. Note that this streams the *output*: the TEI itself is
+                still parsed in full before the first passage comes out.
+
+        Returns:
+            The full document dict, or a generator of passages when stream=True.
+            Either is empty (None, resp. an empty generator) when the document is
+            not a usable TEI.
         """
-        # Load with BeautifulSoup but avoid building huge structures when streaming
-        if hasattr(tei_file, 'read'):
-            # File-like object (BinaryIO/StringIO)
-            content = tei_file.read()
-            if isinstance(content, bytes):
-                content = content.decode('utf-8')
-        else:
-            # Path-like object
-            with open(tei_file, 'r', encoding='utf-8') as f:
-                content = f.read()
-        soup = BeautifulSoup(content, 'xml')
+        soup = load_tei_soup(tei_file)
 
         if soup.TEI is None:
-            logger.warning("%s: The TEI file is not well-formed or empty. Skipping the file.", tei_file)
+            logger.warning("%s: The TEI file is not well-formed or empty. Skipping the file.",
+                           describe_source(tei_file))
             return None if not stream else iter(())
 
         # Determine passage level early
@@ -843,11 +848,6 @@ class TEI2LossyJSONConverter:
 
 def _convert_file_worker(path: str) -> Any:
     """Worker used by ProcessPoolExecutor. Imports inside function to avoid pickling issues."""
-    from bs4 import BeautifulSoup
-    # Reuse existing top-level helpers from this module by importing here
-    with open(path, 'r') as f:
-        content = f.read()
-    soup = BeautifulSoup(content, 'xml')
     converter = TEI2LossyJSONConverter()
     return converter.convert_tei_file(path, stream=False)
 
@@ -1093,7 +1093,7 @@ def xml_table_to_json(table_element: Tag | None) -> dict[str, Any] | None:
 
 
 # Backwards compatible top-level function that uses the class
-def convert_tei_file(tei_file: Union[str, Path, BinaryIO], stream: bool = False) -> Any:
+def convert_tei_file(tei_file: TEISource, stream: bool = False) -> Any:
     converter = TEI2LossyJSONConverter()
     return converter.convert_tei_file(tei_file, stream=stream)
 
