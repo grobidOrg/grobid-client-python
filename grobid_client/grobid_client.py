@@ -646,6 +646,8 @@ class GrobidClient(ApiClient):
                 fs_files.extend(self._collect_directory_files(path, service))
             elif os.path.isfile(path) and self._is_eligible_input(os.path.basename(path), service):
                 fs_files.append(path)
+            elif not os.path.exists(path):
+                self.logger.warning(f"Input path does not exist: {path}")
             else:
                 self.logger.debug(f"Skipping input (not an eligible file/dir/archive): {path}")
 
@@ -927,6 +929,10 @@ class GrobidClient(ApiClient):
 
     def _is_eligible_input(self, filename: str, service: str) -> bool:
         """Return True if a file name is a valid input for the given service."""
+        # macOS AppleDouble metadata entries (._paper.pdf), which tar and zip
+        # add next to the real files, carry the extension but not the document
+        if filename.startswith("._"):
+            return False
         if filename.endswith(".pdf") or filename.endswith(".PDF"):
             return True
         if service == 'processCitationList' and (
@@ -1529,75 +1535,75 @@ class GrobidClient(ApiClient):
 
                 results.append(r)
 
-        for r in concurrent.futures.as_completed(results):
-            input_file, status, text = r.result()
-            filename = self._output_file_name(input_file, input_path, output)
+            for r in concurrent.futures.as_completed(results):
+                input_file, status, text = r.result()
+                filename = self._output_file_name(input_file, input_path, output)
 
-            if status != 200 or text is None:
-                self.logger.error(f"Processing of {input_file} failed with error {status}: {text}")
-                error_count += 1
-                # writing error file with suffixed error code
-                error_filename = self._error_file_name(filename, status)
-                try:
-                    self._write_atomic(error_filename, text if text is not None else "")
-                    self.logger.info(f"Error details written to {error_filename}")
-                    # A previous run may have failed with a different status code;
-                    # keep only the marker of this run so the error state of the
-                    # document stays unambiguous (and skippable).
-                    self._remove_error_files(filename, keep=error_filename)
-                except OSError as e:
-                    self.logger.error(f"Failed to write error file {filename}: {str(e)}")
-            else:
-                processed_count += 1
-                # writing TEI file
-                try:
-                    self._write_atomic(filename, text)
-                    self.logger.debug(f"Successfully wrote TEI file: {filename}")
+                if status != 200 or text is None:
+                    self.logger.error(f"Processing of {input_file} failed with error {status}: {text}")
+                    error_count += 1
+                    # writing error file with suffixed error code
+                    error_filename = self._error_file_name(filename, status)
+                    try:
+                        self._write_atomic(error_filename, text if text is not None else "")
+                        self.logger.info(f"Error details written to {error_filename}")
+                        # A previous run may have failed with a different status code;
+                        # keep only the marker of this run so the error state of the
+                        # document stays unambiguous (and skippable).
+                        self._remove_error_files(filename, keep=error_filename)
+                    except OSError as e:
+                        self.logger.error(f"Failed to write error file {filename}: {str(e)}")
+                else:
+                    processed_count += 1
+                    # writing TEI file
+                    try:
+                        self._write_atomic(filename, text)
+                        self.logger.debug(f"Successfully wrote TEI file: {filename}")
 
-                    # The document no longer is in error: drop the marker left by
-                    # a previous failed run so it is not skipped by --skip-errors.
-                    self._remove_error_files(filename)
+                        # The document no longer is in error: drop the marker left by
+                        # a previous failed run so it is not skipped by --skip-errors.
+                        self._remove_error_files(filename)
 
 
-                    # Convert to JSON if requested
-                    if json_output:
-                        try:
-                            converter = TEI2LossyJSONConverter()
-                            json_data = converter.convert_tei_file(filename, stream=False)
-                            
-                            if json_data:
-                                json_filename = filename.replace('.grobid.tei.xml', '.json')
-                                # Always write JSON file when TEI is written (respects --force behavior)
-                                json_filename_expanded = os.path.expanduser(json_filename)
-                                self._write_atomic(
-                                    json_filename_expanded,
-                                    json.dumps(json_data, indent=2, ensure_ascii=False))
-                                self.logger.debug(f"Successfully wrote JSON file: {json_filename_expanded}")
-                            else:
-                                self.logger.warning(f"Failed to convert TEI to JSON for {filename}")
-                        except Exception as e:
-                            self.logger.error(f"Failed to convert TEI to JSON for {filename}: {str(e)}")
-                    
-                    # Convert to Markdown if requested
-                    if markdown_output:
-                        try:
-                            from .format.TEI2Markdown import TEI2MarkdownConverter
-                            converter = TEI2MarkdownConverter()
-                            markdown_data = converter.convert_tei_file(filename)
+                        # Convert to JSON if requested
+                        if json_output:
+                            try:
+                                converter = TEI2LossyJSONConverter()
+                                json_data = converter.convert_tei_file(filename, stream=False)
+                                
+                                if json_data:
+                                    json_filename = filename.replace('.grobid.tei.xml', '.json')
+                                    # Always write JSON file when TEI is written (respects --force behavior)
+                                    json_filename_expanded = os.path.expanduser(json_filename)
+                                    self._write_atomic(
+                                        json_filename_expanded,
+                                        json.dumps(json_data, indent=2, ensure_ascii=False))
+                                    self.logger.debug(f"Successfully wrote JSON file: {json_filename_expanded}")
+                                else:
+                                    self.logger.warning(f"Failed to convert TEI to JSON for {filename}")
+                            except Exception as e:
+                                self.logger.error(f"Failed to convert TEI to JSON for {filename}: {str(e)}")
+                        
+                        # Convert to Markdown if requested
+                        if markdown_output:
+                            try:
+                                from .format.TEI2Markdown import TEI2MarkdownConverter
+                                converter = TEI2MarkdownConverter()
+                                markdown_data = converter.convert_tei_file(filename)
 
-                            if markdown_data is not None:
-                                markdown_filename = filename.replace('.grobid.tei.xml', '.md')
-                                # Always write Markdown file when TEI is written (respects --force behavior)
-                                markdown_filename_expanded = os.path.expanduser(markdown_filename)
-                                self._write_atomic(markdown_filename_expanded, markdown_data)
-                                self.logger.debug(f"Successfully wrote Markdown file: {markdown_filename_expanded}")
-                            else:
-                                self.logger.warning(f"Failed to convert TEI to Markdown for {filename}")
-                        except Exception as e:
-                            self.logger.error(f"Failed to convert TEI to Markdown for {filename}: {str(e)}")
-                            
-                except OSError as e:
-                    self.logger.error(f"Failed to write TEI XML file {filename}: {str(e)}")
+                                if markdown_data is not None:
+                                    markdown_filename = filename.replace('.grobid.tei.xml', '.md')
+                                    # Always write Markdown file when TEI is written (respects --force behavior)
+                                    markdown_filename_expanded = os.path.expanduser(markdown_filename)
+                                    self._write_atomic(markdown_filename_expanded, markdown_data)
+                                    self.logger.debug(f"Successfully wrote Markdown file: {markdown_filename_expanded}")
+                                else:
+                                    self.logger.warning(f"Failed to convert TEI to Markdown for {filename}")
+                            except Exception as e:
+                                self.logger.error(f"Failed to convert TEI to Markdown for {filename}: {str(e)}")
+                                
+                    except OSError as e:
+                        self.logger.error(f"Failed to write TEI XML file {filename}: {str(e)}")
 
         # Calculate batch statistics
         batch_runtime = time.time() - batch_start_time

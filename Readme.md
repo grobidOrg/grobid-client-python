@@ -414,18 +414,19 @@ settings.
 
 ### Choosing a queue size
 
-`queue_size` controls how many files are grouped into one processing chunk. It is a memory/durability knob, not a
+`queue_size` controls how many files are grouped into one processing chunk. It is a memory knob, not a
 concurrency one: parallelism toward the GROBID server is set by `-n`, and each chunk is processed `n` files at a time.
 When `queue_size` is not set, the client picks a sensible default per input type (see the table above); set it
 explicitly only if you need to override that. A few guidelines:
 
 - **Never set it below `n`.** Effective parallelism is `min(n, queue_size)`: a queue smaller than the thread pool
   leaves workers idle. A bit of headroom above `n` (the default streaming value is 1.2 × `n`) keeps the pool busy.
-- **Results are written per chunk.** Output files land on disk only once a whole chunk has been processed, so a
-  larger queue means results are written less frequently and an interrupted run loses at most one chunk of work
+- **Results are written as they complete.** Each output file lands on disk as soon as its document has been
+  processed, whatever the queue size, so an interrupted run only loses the documents that were in flight
   (already-written results are skipped on re-run unless `--force` is used).
-- **Local PDF directories:** the queue holds only file paths, so large values are essentially free — the default is
-  1000. Lower it if you want results flushed to disk more often on long runs.
+- **Local PDF directories:** the queue holds only file paths (each file is opened when it is sent), so large values
+  are essentially free — the default is 1000. At the end of each chunk the pool waits for its slowest document, so a
+  large queue keeps the workers busy.
 - **Archives (zip/tar) and S3:** each chunk is read or downloaded *into memory* before processing starts, so peak RAM
   grows with `queue_size × average file size`. Keep it moderate — the 1.2 × `n` default is a safe floor; going up to
   a few multiples of `n` (e.g. 2–5 ×) trades memory for slightly better throughput around chunk boundaries.

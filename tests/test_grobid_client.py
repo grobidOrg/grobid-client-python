@@ -1378,6 +1378,43 @@ class TestSkipErrors:
             assert (processed, errors, skipped) == (0, 0, 1)
 
 
+class TestIncrementalWrites:
+    """Results are written as each document finishes, not once the whole queue is done."""
+
+    def test_finished_document_is_written_while_others_are_in_flight(self):
+        with patch('grobid_client.grobid_client.GrobidClient._test_server_connection'):
+            with patch('grobid_client.grobid_client.GrobidClient._configure_logging'):
+                client = GrobidClient(check_server=False)
+        client.logger = Mock()
+
+        with tempfile.TemporaryDirectory() as d:
+            inp = os.path.join(d, 'in')
+            out = os.path.join(d, 'out')
+            os.makedirs(inp)
+            for name in ('a.pdf', 'b.pdf'):
+                with open(os.path.join(inp, name), 'wb') as f:
+                    f.write(b'%PDF')
+            a_output = os.path.join(out, 'a.grobid.tei.xml')
+            seen_while_in_flight = []
+
+            def fake_post(url, files=None, data=None, headers=None, timeout=None):
+                if os.path.basename(files['input'][0]) == 'b.pdf':
+                    # Hold b until a's result reaches the disk (or give up)
+                    deadline = time.time() + 5
+                    while not os.path.isfile(a_output) and time.time() < deadline:
+                        time.sleep(0.01)
+                    seen_while_in_flight.append(os.path.isfile(a_output))
+                resp = Mock()
+                resp.text = '<TEI>ok</TEI>'
+                return (resp, 200)
+
+            with patch.object(GrobidClient, 'post', side_effect=fake_post):
+                client.process('processFulltextDocument', inp, output=out, n=2)
+
+            assert seen_while_in_flight == [True]
+            assert os.path.isfile(os.path.join(out, 'b.grobid.tei.xml'))
+
+
 class TestInMemoryDocuments:
     """Processing a PDF that is already in memory, without writing it to disk.
 
