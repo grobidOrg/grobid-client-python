@@ -949,3 +949,97 @@ class TestTEIConversions:
             assert stream_p.get('text') == non_stream_p.get('text'), \
                 f"Passage {i} text mismatch between stream and non-stream modes"
 
+
+
+class TestConverterCorrectness:
+    """Regression tests for silent data errors in the converters."""
+
+    SAMPLE = os.path.join(TEST_DATA_PATH, '0046d83a-edd6-4631-b57c-755cdcce8b7f.tei.xml')
+
+    @staticmethod
+    def _write(d, name, body):
+        path = os.path.join(d, name)
+        with open(path, 'w', encoding='utf8') as fh:
+            fh.write('<?xml version="1.0" encoding="UTF-8"?>\n'
+                     '<TEI xmlns="http://www.tei-c.org/ns/1.0">' + body + '</TEI>')
+        return path
+
+    def test_box_to_dict_reads_page_x_y_width_height(self):
+        from grobid_client.format.TEI2LossyJSON import box_to_dict
+        assert box_to_dict("4,319.75,324.34,218.81,9.71".split(",")) == {
+            'page': 4, 'x': 319.75, 'y': 324.34, 'width': 218.81, 'height': 9.71}
+        assert box_to_dict("1,2,3,4".split(",")) == {}
+
+    def test_json_coords_keep_every_field_of_the_tei_box(self):
+        from grobid_client.format.TEI2LossyJSON import TEI2LossyJSONConverter
+        with tempfile.TemporaryDirectory() as d:
+            tei = self._write(d, 'x.tei.xml', (
+                '<teiHeader><fileDesc><titleStmt><title>T</title></titleStmt></fileDesc></teiHeader>'
+                '<text><body>'
+                '<div><p coords="2,10.5,20.5,100,30;3,1,2,3,4">Text.</p></div>'
+                '<figure xml:id="fig_0"><head>Figure 1</head><graphic coords="7,62.7,274.72,463.04,7.36"/></figure>'
+                '<figure xml:id="tab_0" type="table" coords="8,1,2,3,4"><head>Table 1</head>'
+                '<table><row><cell>a</cell></row></table></figure>'
+                '</body></text>'))
+            doc = TEI2LossyJSONConverter().convert_tei_file(tei, stream=False)
+        assert doc['body_text'][0]['coords'] == [
+            {'page': 2, 'x': 10.5, 'y': 20.5, 'width': 100.0, 'height': 30.0},
+            {'page': 3, 'x': 1.0, 'y': 2.0, 'width': 3.0, 'height': 4.0}]
+        by_id = {f['id']: f for f in doc['figures_and_tables']}
+        assert by_id['fig_0']['coords'] == [
+            {'page': 7, 'x': 62.7, 'y': 274.72, 'width': 463.04, 'height': 7.36}]
+        assert by_id['tab_0']['coords'] == [
+            {'page': 8, 'x': 1.0, 'y': 2.0, 'width': 3.0, 'height': 4.0}]
+
+    def test_json_reference_ids_match_the_in_text_targets(self):
+        from grobid_client.format.TEI2LossyJSON import TEI2LossyJSONConverter
+        doc = TEI2LossyJSONConverter().convert_tei_file(self.SAMPLE, stream=False)
+        ids = [r['id'] for r in doc['references']]
+        assert ids[:3] == ['b0', 'b1', 'b2']
+        # every citation in the body resolves to a reference
+        targets = {ref['target'].lstrip('#') for passage in doc['body_text']
+                   for ref in passage.get('refs', [])
+                   if ref.get('type') == 'bibr' and ref.get('target')}
+        assert targets and targets <= set(ids)
+
+    def test_json_reference_without_xml_id_falls_back_to_its_position(self):
+        from grobid_client.format.TEI2LossyJSON import TEI2LossyJSONConverter
+        with tempfile.TemporaryDirectory() as d:
+            tei = self._write(d, 'x.tei.xml', (
+                '<teiHeader><fileDesc><titleStmt><title>T</title></titleStmt></fileDesc></teiHeader>'
+                '<text><body><div><p>Text.</p></div></body><back><div type="references"><listBibl>'
+                '<biblStruct><analytic><title level="a">A</title></analytic></biblStruct>'
+                '<biblStruct><analytic><title level="a">B</title></analytic></biblStruct>'
+                '</listBibl></div></back></text>'))
+            doc = TEI2LossyJSONConverter().convert_tei_file(tei, stream=False)
+            assert [r['id'] for r in doc['references']] == ['b0', 'b1']
+            assert 'target' not in doc['references'][0]
+
+    def test_markdown_includes_figures_and_tables(self):
+        from grobid_client.format.TEI2Markdown import TEI2MarkdownConverter
+        with tempfile.TemporaryDirectory() as d:
+            tei = self._write(d, 'x.tei.xml', (
+                '<teiHeader><fileDesc><titleStmt><title>T</title></titleStmt></fileDesc></teiHeader>'
+                '<text><body>'
+                '<div><head>Intro</head><p>Body text.</p></div>'
+                '<figure xml:id="fig_0"><head>Figure 1</head><label>1</label>'
+                '<figDesc>Overview of\n   the setup.</figDesc><graphic coords="1,1,1,1,1"/></figure>'
+                '<figure xml:id="tab_0" type="table"><head>Table 1</head><label>1</label>'
+                '<figDesc>Results.</figDesc><table><row><cell>a</cell><cell>b</cell></row>'
+                '<row><cell>1</cell><cell>2</cell></row></table><note>n=3</note></figure>'
+                '</body></text>'))
+            md = TEI2MarkdownConverter().convert_tei_file(tei)
+        assert '### Intro' in md and 'Body text.' in md
+        assert '**Figure 1**' in md and '*Overview of the setup.*' in md
+        assert '**Table 1**' in md and '*Results.*' in md
+        assert '| a | b |\n| --- | --- |\n| 1 | 2 |' in md
+        assert 'n=3' in md
+        assert md.index('Body text.') < md.index('**Figure 1**') < md.index('**Table 1**')
+
+    def test_markdown_figure_count_matches_json(self):
+        from grobid_client.format.TEI2LossyJSON import TEI2LossyJSONConverter
+        from grobid_client.format.TEI2Markdown import TEI2MarkdownConverter
+        doc = TEI2LossyJSONConverter().convert_tei_file(self.SAMPLE, stream=False)
+        md = TEI2MarkdownConverter().convert_tei_file(self.SAMPLE)
+        for item in doc['figures_and_tables']:
+            assert f"**{item['head']}**" in md, item['head']

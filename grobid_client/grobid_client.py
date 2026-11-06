@@ -81,8 +81,9 @@ class GrobidClient(ApiClient):
     # next to them when a document fails (e.g. paper_500.txt). The latter is what
     # skip_errors looks for to know that a document already failed.
     # See https://github.com/grobidOrg/grobid-client-python/issues/119
+    # Error markers are <stem>_<HTTP status>.txt
+    ERROR_FILE_RE = re.compile(r"_[1-5]\d{2}\.txt$")
     TEI_SUFFIX = ".grobid.tei.xml"
-    ERROR_FILE_RE = re.compile(r"_\d{3}\.txt$")
 
     # Name given to a PDF that is passed as bytes and left unnamed by the caller.
     # A multipart part needs a filename, and GROBID echoes it in its own logs and
@@ -454,8 +455,16 @@ class GrobidClient(ApiClient):
             # so sub/paper.pdf -> <output>/sub/paper.grobid.tei.xml. Keeping the
             # subdirectories also prevents two inputs that share a basename
             # from mapping to the same output file.
-            input_path_abs = pathlib.Path(input_path).resolve()
-            input_file_rel = input_file_path.resolve().relative_to(input_path_abs)
+            # os.path.abspath, not Path.resolve(): resolving follows symlinks,
+            # and a PDF that is a link to somewhere outside the input directory
+            # would then not be "relative to" it any more.
+            input_path_abs = pathlib.Path(os.path.abspath(input_path))
+            try:
+                input_file_rel = pathlib.Path(os.path.abspath(input_file)).relative_to(input_path_abs)
+            except ValueError:
+                # Not under the input directory at all (e.g. an in-memory
+                # document named with an absolute path): keep only the name.
+                input_file_rel = pathlib.Path(input_file_path.name)
             filename = pathlib.Path(output) / input_file_rel.with_name(
                 f"{input_file_rel.stem}.grobid.tei.xml")
         else:
@@ -531,10 +540,17 @@ class GrobidClient(ApiClient):
         the names that actually look like an error marker.
         """
         stem = os.path.expanduser(self._output_stem(tei_filename))
-        return [
-            candidate for candidate in sorted(glob.glob(glob.escape(stem) + "_*.txt"))
-            if self.ERROR_FILE_RE.search(os.path.basename(candidate))
-        ]
+        # The whole name must be <stem>_<HTTP status>.txt: a looser match
+        # would take report_500_503.txt (report_500.pdf's marker) for one of
+        # report.pdf, or refs_001.txt (an input) for a marker of refs.txt.
+        stem_name = os.path.basename(stem)
+        found = []
+        for candidate in sorted(glob.glob(glob.escape(stem) + "_*.txt")):
+            name = os.path.basename(candidate)
+            match = self.ERROR_FILE_RE.search(name)
+            if match and name[:match.start()] == stem_name:
+                found.append(candidate)
+        return found
 
     def _remove_error_files(self, tei_filename: str, keep: Optional[str] = None) -> None:
         """Delete stale error markers for an output, optionally keeping one.

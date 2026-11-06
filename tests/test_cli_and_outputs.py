@@ -614,3 +614,78 @@ class TestLoggingConfiguration:
         client._configure_logging()
         client._configure_logging()
         assert len(client.logger.handlers) == 1
+
+
+class TestSymlinkedInputs:
+    """A symlinked PDF must be named after the link, not its target."""
+
+    def test_symlink_outside_the_input_directory(self):
+        client = _client()
+        with tempfile.TemporaryDirectory() as d:
+            real = _touch(d, 'elsewhere', 'a.pdf', content=b'%PDF')
+            os.makedirs(os.path.join(d, 'in', 'sub'))
+            link = os.path.join(d, 'in', 'sub', 'a.pdf')
+            try:
+                os.symlink(real, link)
+            except (OSError, NotImplementedError):
+                pytest.skip('symlinks not supported here')
+            out = os.path.join(d, 'out')
+            post, sent = _fake_post()
+            with patch.object(GrobidClient, 'post', side_effect=post):
+                client.process('processFulltextDocument', os.path.join(d, 'in'), output=out)
+            assert sent == [link]
+            assert _outputs(out, '.grobid.tei.xml') == ['sub/a.grobid.tei.xml']
+
+    def test_output_name_falls_back_to_basename_outside_input_path(self):
+        client = _client()
+        assert client._output_file_name('/elsewhere/doc.pdf', '/input', '/out') == \
+            os.path.join('/out', 'doc.grobid.tei.xml')
+
+
+class TestErrorMarkerMatching:
+    """Only <stem>_<3 digits>.txt is a marker of <stem>.grobid.tei.xml."""
+
+    def test_lookalike_files_are_not_markers(self):
+        client = _client()
+        with tempfile.TemporaryDirectory() as d:
+            for name in ['refs_001.txt', 'report_500_503.txt', 'report_5000.txt', 'report_999.txt',
+                         'report_abc.txt', 'reportx_500.txt', 'report_500.txt']:
+                _touch(d, name)
+            assert client._find_error_files(os.path.join(d, 'refs.grobid.tei.xml')) == []
+            assert client._find_error_files(os.path.join(d, 'report.grobid.tei.xml')) == [
+                os.path.join(d, 'report_500.txt')]
+            assert client._find_error_files(os.path.join(d, 'report_500.grobid.tei.xml')) == [
+                os.path.join(d, 'report_500_503.txt')]
+
+    def test_a_successful_citation_list_does_not_delete_a_sibling_input(self):
+        """refs.txt succeeding must not remove refs_001.txt, another input."""
+        client = _client()
+        with tempfile.TemporaryDirectory() as d:
+            _touch(d, 'in', 'refs.txt', content=b'one ref')
+            other = _touch(d, 'in', 'refs_001.txt', content=b'another ref')
+            post, sent = _fake_post()
+            with patch.object(GrobidClient, 'post', side_effect=post):
+                client.process('processCitationList', os.path.join(d, 'in'), output=None)
+            assert os.path.isfile(other)
+            assert _outputs(os.path.join(d, 'in'), '.grobid.tei.xml') == [
+                'refs.grobid.tei.xml', 'refs_001.grobid.tei.xml']
+
+    def test_skip_errors_does_not_confuse_report_and_report_500(self):
+        client = _client()
+        with tempfile.TemporaryDirectory() as d:
+            _touch(d, 'in', 'report.pdf')
+            _touch(d, 'in', 'report_500.pdf')
+            out = os.path.join(d, 'out')
+            post, sent = _fake_post(failing={'report_500.pdf'})
+            with patch.object(GrobidClient, 'post', side_effect=post):
+                client.process('processFulltextDocument', os.path.join(d, 'in'), output=out, force=True)
+            assert _outputs(out, '.txt') == ['report_500_500.txt']
+            # report.pdf's TEI exists; a rerun with skip_errors must retry only report_500.pdf
+            os.remove(os.path.join(out, 'report.grobid.tei.xml'))
+            post, sent = _fake_post(failing={'report_500.pdf'})
+            with patch.object(GrobidClient, 'post', side_effect=post):
+                client.process('processFulltextDocument', os.path.join(d, 'in'), output=out,
+                               force=False, skip_errors=True)
+            assert [os.path.basename(s) for s in sent] == ['report.pdf']
+            # and report.pdf succeeding leaves report_500.pdf's marker alone
+            assert _outputs(out, '.txt') == ['report_500_500.txt']
