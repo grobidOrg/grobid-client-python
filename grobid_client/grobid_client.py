@@ -950,10 +950,16 @@ class GrobidClient(ApiClient):
         # add next to the real files, carry the extension but not the document
         if filename.startswith("._"):
             return False
+        if service == 'processCitationList':
+            # The input is a text file with one raw citation per line; a PDF
+            # would be read as text by process_txt and fail. An error marker
+            # (<stem>_<status>.txt, written next to the inputs when no output
+            # directory is given) is not an input either, or a rerun would
+            # post the markers of the previous run as citation lists.
+            if self.ERROR_FILE_RE.search(filename):
+                return False
+            return filename.endswith(".txt") or filename.endswith(".TXT")
         if filename.endswith(".pdf") or filename.endswith(".PDF"):
-            return True
-        if service == 'processCitationList' and (
-                filename.endswith(".txt") or filename.endswith(".TXT")):
             return True
         if service == 'processCitationPatentST36' and (
                 filename.endswith(".xml") or filename.endswith(".XML")):
@@ -1812,14 +1818,17 @@ class GrobidClient(ApiClient):
 
             return (name, status, res.text)
 
-        except IOError as e:
-            self.logger.error(f"Failed to open PDF file {name}: {str(e)}")
-            return (name, 400, f"Failed to open file: {str(e)}")
+        # requests' exceptions derive from IOError, so they have to be caught
+        # before it or every timeout/connection error would be reported as a
+        # failure to open the file (status 400).
         except requests.exceptions.ReadTimeout as e:
             self.logger.error(f"Request timeout for {name}: {str(e)}")
             return (name, 408, f"Request timeout: {str(e)}")
         except requests.exceptions.RequestException as e:
             return self._handle_request_error(name, e)
+        except IOError as e:
+            self.logger.error(f"Failed to open PDF file {name}: {str(e)}")
+            return (name, 400, f"Failed to open file: {str(e)}")
         except Exception as e:
             return self._handle_unexpected_error(name, e)
         finally:
