@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, List, Dict, Union, Optional, BinaryIO
 from bs4 import BeautifulSoup, NavigableString, Tag
 import logging
-import dateparser
+from datetime import datetime
 
 # Configure module-level logger
 logger = logging.getLogger(__name__)
@@ -115,8 +115,16 @@ class TEI2MarkdownConverter:
             return None
 
     def _extract_title(self, soup: BeautifulSoup) -> Optional[str]:
-        """Extract document title from TEI."""
-        title_node = soup.find("title", attrs={"type": "main", "level": "a"})
+        """Extract document title from the TEI header.
+
+        Only the header is searched: bibliography entries also carry
+        <title level="a" type="main">, and a document without a header title
+        would otherwise be titled after its first reference.
+        """
+        tei_header = soup.find("teiHeader")
+        if not tei_header:
+            return None
+        title_node = tei_header.find("title", attrs={"type": "main", "level": "a"})
         if title_node:
             return title_node.get_text().strip()
         return None
@@ -166,19 +174,41 @@ class TEI2MarkdownConverter:
         return affiliations
 
     def _extract_publication_date(self, soup: BeautifulSoup) -> Optional[str]:
-        """Extract publication date from TEI."""
-        pub_date = soup.find("date", attrs={"type": "published"})
-        if pub_date:
-            iso_date = pub_date.attrs.get("when")
-            if iso_date:
-                try:
-                    parsed_date = dateparser.parse(iso_date)
-                    if parsed_date:
-                        return parsed_date.strftime("%B %d, %Y")
-                except Exception:
-                    pass
-                return iso_date
-        return None
+        """Extract the publication date from the TEI header.
+
+        Only the header is searched (references carry <date type="published">
+        too). The date is rendered at the precision GROBID gives it: a year
+        stays a year, a year-month becomes "May 2016", and only a full date
+        gets a day. A date parser would fill a missing month and day with
+        today's, inventing a day of publication.
+        """
+        tei_header = soup.find("teiHeader")
+        if not tei_header:
+            return None
+        pub_date = tei_header.find("date", attrs={"type": "published"})
+        if not pub_date:
+            return None
+        iso_date = (pub_date.attrs.get("when") or "").strip()
+        if not iso_date:
+            text = pub_date.get_text().strip()
+            return text or None
+        return self._format_iso_date(iso_date)
+
+    @staticmethod
+    def _format_iso_date(iso_date: str) -> str:
+        """Render an ISO 8601 date (YYYY, YYYY-MM or YYYY-MM-DD) for reading."""
+        match = re.fullmatch(r"(\d{4})(?:-(\d{2}))?(?:-(\d{2}))?(?:T.*)?", iso_date)
+        if not match:
+            return iso_date
+        year, month, day = match.groups()
+        try:
+            if month and day:
+                return datetime(int(year), int(month), int(day)).strftime("%B %d, %Y")
+            if month:
+                return datetime(int(year), int(month), 1).strftime("%B %Y")
+        except ValueError:
+            return iso_date
+        return year
 
     def _extract_abstract(self, soup: BeautifulSoup) -> str:
         """Extract abstract from TEI."""
