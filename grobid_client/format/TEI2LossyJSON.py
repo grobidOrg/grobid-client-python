@@ -141,6 +141,8 @@ class TEI2LossyJSONConverter:
                     if abstract_node:
                         abstract_paragraph_nodes = abstract_node.find_all("p")
                         if passage_level == "sentence":
+                            # A paragraph GROBID did not segment (no <s>) is
+                            # kept whole rather than dropped as an empty list
                             biblio_structure["abstract"] = [
                                 [
                                     {
@@ -152,7 +154,7 @@ class TEI2LossyJSONConverter:
                                         ] if sentence.has_attr("coords") else [],
                                         "refs": get_refs_with_offsets(sentence)
                                     }
-                                    for id, sentence in enumerate(paragraph.find_all("s"))
+                                    for id, sentence in enumerate(paragraph.find_all("s") or [paragraph])
                                 ]
                                 for paragraph in abstract_paragraph_nodes
                             ]
@@ -675,12 +677,9 @@ class TEI2LossyJSONConverter:
 
                 # Check if this is a header-only div (no content, no nested divs)
                 # If so, capture its header as context for subsequent divs
-                head = div.find("head")
-                direct_p_nodes = [c for c in div.children if hasattr(c, 'name') and c.name == "p"]
-                direct_formula_nodes = [c for c in div.children if hasattr(c, 'name') and c.name == "formula"]
-                nested_divs = [c for c in div.children if hasattr(c, 'name') and (c.name == "div" or (c.name and c.name.endswith(":div")))]
-                has_direct_content = len(direct_p_nodes) > 0 or len(direct_formula_nodes) > 0
-                
+                head = div.find("head", recursive=False)
+                nested_divs, has_direct_content = self._div_shape(div)
+
                 if head and not has_direct_content and len(nested_divs) == 0:
                     # This is a header-only div with no nested content
                     # Capture the header for the next div
@@ -701,33 +700,31 @@ class TEI2LossyJSONConverter:
         Supports nested divs for complex back sections like annex with multiple subsections.
         Also handles formula elements that are direct children of divs.
         """
-        head = div.find("head")
-        p_nodes = div.find_all("p")
+        # The div's own heading only: a recursive find would take a nested
+        # div's heading for the heading of the paragraphs around it
+        head = div.find("head", recursive=False)
         head_section = None
         current_head_paragraph = None
 
-        # Check if this div has nested divs first (handle namespace variants)
-        nested_divs = []
-        for child in div.children:
-            if hasattr(child, 'name') and child.name:
-                # Handle both namespaced and non-namespaced divs
-                if child.name == "div" or child.name.endswith(":div"):
-                    nested_divs.append(child)
-
-        # Count only direct child paragraphs and formulas, not those in nested divs
-        direct_p_nodes = [child for child in div.children if hasattr(child, 'name') and child.name == "p"]
-        direct_formula_nodes = [child for child in div.children if hasattr(child, 'name') and child.name == "formula"]
-        has_direct_content = len(direct_p_nodes) > 0 or len(direct_formula_nodes) > 0
+        nested_divs, has_direct_content = self._div_shape(div)
 
         if len(nested_divs) > 0 and not has_direct_content:
-            # This is a container div - process each nested div independently
+            # This is a container div - process each nested div independently.
+            # A nested div that only carries a heading (no paragraphs, no divs)
+            # lends it to the next sibling, as top-level divs do.
+            carried_head = None
             for nested_div in nested_divs:
                 # Skip references divs
                 if nested_div.get("type") == "references":
                     continue
-                # Pass None as head_paragraph to ensure nested divs use their own headers
-                for passage in self._process_div_with_nested_content(nested_div, passage_level, None):
+                nested_head = nested_div.find("head", recursive=False)
+                nested_nested, nested_has_content = self._div_shape(nested_div)
+                if nested_head and not nested_has_content and not nested_nested:
+                    carried_head = self._clean_text(nested_head.get_text())
+                    continue
+                for passage in self._process_div_with_nested_content(nested_div, passage_level, carried_head):
                     yield passage
+                carried_head = None
             return  # Don't process this div further
 
         # Determine the section header and content type for divs with content
@@ -759,16 +756,27 @@ class TEI2LossyJSONConverter:
                     # Generic handling - capitalize and format
                     head_section = div_type.replace("_", " ").title()
 
-        # Process direct children (paragraphs and formulas) in document order
+        # Process direct children (paragraphs, formulas and nested divs) in
+        # document order
         for child in div.children:
             if not hasattr(child, 'name') or not child.name:
                 continue
 
-            if child.name == "p":
+            if child.name == "div" or child.name.endswith(":div"):
+                # A div mixing paragraphs and sub-divs: the sub-div is a
+                # section of its own, with its own heading
+                if child.get("type") == "references":
+                    continue
+                for passage in self._process_div_with_nested_content(child, passage_level, None):
+                    yield passage
+
+            elif child.name == "p":
                 paragraph_id = get_random_id(prefix="p_")
 
-                if passage_level == "sentence":
-                    for id_s, sentence in enumerate(child.find_all("s")):
+                # A paragraph GROBID did not segment (no <s>) is yielded whole
+                sentences = child.find_all("s") if passage_level == "sentence" else []
+                if sentences:
+                    for id_s, sentence in enumerate(sentences):
                         struct = get_formatted_passage(current_head_paragraph or head_paragraph, head_section, paragraph_id, sentence)
                         if self.validate_refs:
                             for ref in struct['refs']:
@@ -813,9 +821,20 @@ class TEI2LossyJSONConverter:
                     
                     yield formula_passage
 
-        # Update head_paragraph for potential next div
-        if current_head_paragraph is not None:
-            head_paragraph = current_head_paragraph
+    @staticmethod
+    def _div_shape(div: Tag) -> tuple[list[Tag], bool]:
+        """Return (direct nested divs, whether the div has direct paragraphs/formulas)."""
+        nested_divs = []
+        has_direct_content = False
+        for child in div.children:
+            name = getattr(child, 'name', None)
+            if not name:
+                continue
+            if name == "div" or name.endswith(":div"):
+                nested_divs.append(child)
+            elif name in ("p", "formula"):
+                has_direct_content = True
+        return nested_divs, has_direct_content
 
     def process_directory(self, directory: Union[str, Path], pattern: str = "*.tei.xml", parallel: bool = True, workers: int | None = None) -> Iterator[Dict]:
         """Process a directory of TEI files and yield converted documents.
