@@ -233,8 +233,43 @@ class TEI2MarkdownConverter:
                     formula_text = self._process_formula(child)
                     if formula_text.strip():
                         fulltext_sections.append(f"{formula_text}\n\n")
-        
+
+        # GROBID emits figures and tables as direct children of <body>, not
+        # inside paragraphs, so they are rendered after the sections.
+        figures = [self._process_figure(f) for f in body.find_all("figure")]
+        figures = [f for f in figures if f]
+        if figures:
+            fulltext_sections.append("### Figures and Tables\n\n")
+            fulltext_sections.extend(f"{f}\n\n" for f in figures)
+
         return "".join(fulltext_sections)
+
+    def _process_figure(self, figure: Tag) -> str:
+        """Render a <figure> (a figure or, with type="table", a table)."""
+        is_table = figure.get("type") == "table"
+        head = figure.find("head")
+        caption = head.get_text(" ", strip=True) if head else ""
+        if not caption:
+            label = figure.find("label")
+            kind = "Table" if is_table else "Figure"
+            caption = f"{kind} {label.get_text(strip=True)}" if label else kind
+        parts = [f"**{caption}**"]
+        fig_desc = figure.find("figDesc")
+        if fig_desc:
+            desc = " ".join(fig_desc.get_text(" ", strip=True).split())
+            if desc:
+                parts.append(f"*{desc}*")
+        table = figure.find("table") if is_table else None
+        if table is not None:
+            table_md = self._table_to_markdown(table)
+            if table_md:
+                parts.append(table_md)
+        note = figure.find("note")
+        if note:
+            note_text = " ".join(note.get_text(" ", strip=True).split())
+            if note_text:
+                parts.append(note_text)
+        return "\n\n".join(parts)
 
     def _extract_annex(self, soup: BeautifulSoup) -> str:
         """Extract annex content (everything in <back> except references and content that should be in body) from TEI."""
@@ -398,7 +433,10 @@ class TEI2MarkdownConverter:
             
             if cells:
                 markdown_lines.append("| " + " | ".join(cells) + " |")
-        
+                if len(markdown_lines) == 1:
+                    # a separator after the first row makes it a Markdown table
+                    markdown_lines.append("|" + "|".join([" --- "] * len(cells)) + "|")
+
         return "\n".join(markdown_lines) if markdown_lines else ""
 
     def _format_reference(self, bibl_struct: Tag, ref_num: int) -> str:

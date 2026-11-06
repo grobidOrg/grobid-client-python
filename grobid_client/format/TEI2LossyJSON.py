@@ -221,7 +221,7 @@ class TEI2LossyJSONConverter:
                     # Extract references from listBibl with comprehensive processing
                     list_bibl = soup.find("listBibl")
                     if list_bibl:
-                        for i, bibl_struct in enumerate(list_bibl.find_all("biblStruct"), 1):
+                        for i, bibl_struct in enumerate(list_bibl.find_all("biblStruct")):
                             ref_data = self._extract_comprehensive_reference_data(bibl_struct, i)
                             if ref_data:
                                 references_structure.append(ref_data)
@@ -235,10 +235,12 @@ class TEI2LossyJSONConverter:
         """
 
         citation_data = OrderedDict()
-        citation_data['id'] = f"b{index}"
-
-        # Extract reference identifier if present
+        # The id is the TEI xml:id (b0, b1, ...), which is what the in-text
+        # <ref target="#bN"> values point at, so consumers can resolve
+        # refs[].target against references[].id. GROBID numbers from 0; the
+        # position is only a fallback for an entry without an xml:id.
         xml_id = bibl_struct.get('{http://www.w3.org/XML/1998/namespace}id') or bibl_struct.get('xml:id')
+        citation_data['id'] = xml_id if xml_id else f"b{index}"
         if xml_id:
             citation_data['target'] = xml_id
 
@@ -853,13 +855,18 @@ def _convert_file_worker(path: str) -> Any:
 
 
 def box_to_dict(coord_list: list[str]) -> dict[str, float]:
-    """Convert coordinate list to dictionary format."""
-    if len(coord_list) >= 4:
+    """Convert one GROBID bounding box to a dictionary.
+
+    A GROBID ``coords`` attribute holds one or more boxes separated by ``;``,
+    each box being ``page,x,y,width,height`` (the page number comes first).
+    """
+    if len(coord_list) >= 5:
         return {
-            "x": float(coord_list[0]),
-            "y": float(coord_list[1]),
-            "width": float(coord_list[2]),
-            "height": float(coord_list[3])
+            "page": int(float(coord_list[0])),
+            "x": float(coord_list[1]),
+            "y": float(coord_list[2]),
+            "width": float(coord_list[3]),
+            "height": float(coord_list[4])
         }
     return {}
 

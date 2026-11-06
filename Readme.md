@@ -240,7 +240,7 @@ client = GrobidClient(config_path="./config.json")
 client.process(
     service="processFulltextDocument",
     input_path="/path/to/pdfs",
-    output_path="/path/to/output",
+    output="/path/to/output",
     n=20
 )
 ```
@@ -252,7 +252,7 @@ client.process(
 client.process(
     service="processFulltextDocument",
     input_path="/path/to/pdfs",
-    output_path="/path/to/output",
+    output="/path/to/output",
     n=10,
     generate_ids=True,
     consolidate_header=True,
@@ -264,7 +264,7 @@ client.process(
 client.process(
     service="processFulltextDocument",
     input_path="/path/to/pdfs",
-    output_path="/path/to/output",
+    output="/path/to/output",
     json_output=True
 )
 
@@ -272,7 +272,7 @@ client.process(
 client.process(
     service="processFulltextDocument",
     input_path="/path/to/pdfs",
-    output_path="/path/to/output",
+    output="/path/to/output",
     markdown_output=True
 )
 
@@ -280,7 +280,7 @@ client.process(
 client.process(
     service="processFulltextDocument",
     input_path="/path/to/pdfs",
-    output_path="/path/to/output",
+    output="/path/to/output",
     force=False,
     skip_errors=True
 )
@@ -290,7 +290,7 @@ client.process(
 client.process(
     service="processCitationList",
     input_path="/path/to/citations.txt",
-    output_path="/path/to/output"
+    output="/path/to/output"
 )
 ```
 
@@ -606,7 +606,7 @@ grobid_client --input pdfs/ --output results/ --json --tei_coordinates --segment
 client.process(
     service="processFulltextDocument",
     input_path="/path/to/pdfs",
-    output_path="/path/to/output",
+    output="/path/to/output",
     json_output=True
 )
 ```
@@ -687,7 +687,7 @@ grobid_client --input pdfs/ --output results/ --markdown --tei_coordinates --seg
 client.process(
     service="processFulltextDocument",
     input_path="/path/to/pdfs",
-    output_path="/path/to/output",
+    output="/path/to/output",
     markdown_output=True
 )
 ```
