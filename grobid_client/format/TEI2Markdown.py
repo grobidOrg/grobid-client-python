@@ -209,10 +209,11 @@ class TEI2MarkdownConverter:
         if not body:
             return ""
         
-        # Process each div in the body
+        # Process each div in the body (nested ones included: find_all is
+        # recursive, so each div only renders its own heading and paragraphs)
         for div in body.find_all("div"):
             # Get section heading
-            head = div.find("head")
+            head = div.find("head", recursive=False)
             if head:
                 section_title = head.get_text().strip()
                 if section_title:
@@ -277,7 +278,7 @@ class TEI2MarkdownConverter:
     def _process_div_and_nested_divs(self, div: Tag, annex_sections: list[str]) -> None:
         """Process a div element and its nested div elements."""
         # Add section header if present for this div (avoid duplicates)
-        head = div.find("head")
+        head = div.find("head", recursive=False)
         if head and head.get_text().strip():
             header_text = f"### {head.get_text().strip()}\n\n"
             # Check if this header already exists to avoid duplication
