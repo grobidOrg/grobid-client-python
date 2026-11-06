@@ -796,9 +796,6 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install in development mode with test dependencies
 pip install -e .[dev]
-
-# Install pre-commit hooks (optional)
-pre-commit install
 ```
 
 ### Creating a New Release
