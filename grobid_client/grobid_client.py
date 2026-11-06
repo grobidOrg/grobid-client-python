@@ -156,7 +156,15 @@ class GrobidClient(ApiClient):
         self._configure_logging()
 
         if check_server:
-            self._test_server_connection()
+            # A server that answers isalive with anything but 200 (a wrong
+            # URL, a proxy error page) is no more usable than one that does
+            # not answer: fail now rather than record one error marker per
+            # document, which --skip_errors would then honour on the rerun.
+            is_up, status = self._test_server_connection()
+            if not is_up:
+                raise ServerUnavailableException(
+                    f"GROBID server {self.config['grobid_server']} does not appear up and running "
+                    f"(status: {status})")
 
     def _set_config_params(self, params: dict) -> None:
         """Set configuration parameters, only if they are not None."""
