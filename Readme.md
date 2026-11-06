@@ -509,6 +509,8 @@ The config file can include logging settings:
 ```
 
 **Note**: The `--verbose` command line flag always takes precedence over configuration file logging settings.
+Without `--verbose` the client never logs above `WARNING`: a `"level": "INFO"` in the config file is treated as
+`WARNING`, so that a run stays quiet unless detail is asked for on the command line. `DEBUG` is honoured as written.
 
 ## 🔬 Services
 
