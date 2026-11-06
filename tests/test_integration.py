@@ -149,7 +149,7 @@ class TestGrobidClientIntegration:
             with patch('grobid_client.grobid_client.GrobidClient._configure_logging'):
                 with patch('os.path.isfile', return_value=False):
                     with patch('pathlib.Path'):
-                        with patch('builtins.open', mock_open()):
+                        with patch.object(GrobidClient, '_write_atomic'):   # the write itself is tested elsewhere
                             with patch('concurrent.futures.ThreadPoolExecutor') as mock_executor:
                                 # Setup mock executor
                                 mock_future = Mock()
@@ -306,7 +306,7 @@ class TestGrobidClientIntegration:
             with patch('grobid_client.grobid_client.GrobidClient._configure_logging'):
                 with patch('os.path.isfile', return_value=False):
                     with patch('pathlib.Path'):
-                        with patch('builtins.open', mock_open()):
+                        with patch.object(GrobidClient, '_write_atomic'):   # the write itself is tested elsewhere
                             with patch('concurrent.futures.ThreadPoolExecutor') as mock_executor:
                                 # Setup mock executor for stress test
                                 mock_futures = []

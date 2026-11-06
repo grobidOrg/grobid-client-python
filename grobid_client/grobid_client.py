@@ -19,6 +19,7 @@ from __future__ import annotations
 import math
 import os
 import io
+import sys
 import json
 import argparse
 import fnmatch
@@ -182,7 +183,7 @@ class GrobidClient(ApiClient):
             return configured
         if local_files:
             return self.LOCAL_DIR_QUEUE_SIZE
-        return math.ceil(n * 1.2)
+        return math.ceil(max(1, n) * 1.2)
 
     def _warn_on_consolidation_timeout(self, consolidate_citations: bool) -> None:
         """Warn when citation consolidation is enabled with a low client timeout.
@@ -985,7 +986,10 @@ class GrobidClient(ApiClient):
         if the entry name has no usable path component.
         """
         normalized = arcname.replace("\\", "/")
-        parts = [p for p in normalized.split("/") if p not in ("", ".", "..")]
+        parts = [
+            p for p in normalized.split("/")
+            if p not in ("", ".", "..") and not re.fullmatch(r"[A-Za-z]:", p)
+        ]
         if not parts:
             return None
         return os.path.join(dest_dir, *parts)
@@ -1008,7 +1012,11 @@ class GrobidClient(ApiClient):
                     f"Only .zip archives can be range-streamed over s3://: {archive_path}"
                 )
             stream = self._s3_open(archive_path)
-            archive = zipfile.ZipFile(stream)
+            try:
+                archive = zipfile.ZipFile(stream)
+            except BaseException:
+                stream.close()   # not a zip: nobody else will close the stream
+                raise
             archive._grobid_stream = stream  # closed by _process_archive_core
             names = [n for n in archive.namelist() if not n.endswith("/")]
             return "zip", archive, names
@@ -1019,7 +1027,11 @@ class GrobidClient(ApiClient):
             return "zip", archive, names
 
         archive = tarfile.open(archive_path, "r:*")
-        names = [m.name for m in archive.getmembers() if m.isfile()]
+        try:
+            names = [m.name for m in archive.getmembers() if m.isfile()]
+        except BaseException:
+            archive.close()  # a truncated tar fails while listing
+            raise
         return "tar", archive, names
 
     def _extract_archive_member(
@@ -1458,8 +1470,8 @@ class GrobidClient(ApiClient):
         skipped_count = 0
 
         # we use ThreadPoolExecutor and not ProcessPoolExecutor because it is an I/O intensive process
-        with concurrent.futures.ThreadPoolExecutor(max_workers=n) as executor:
-            # with concurrent.futures.ProcessPoolExecutor(max_workers=n) as executor:
+        # A pool of one is still a pool: n < 1 would make ThreadPoolExecutor raise
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, n)) as executor:
             results = []
             for input_file in input_files:
                 # An entry is either a path or an in-memory document (a named
@@ -1572,11 +1584,13 @@ class GrobidClient(ApiClient):
                     except OSError as e:
                         self.logger.error(f"Failed to write error file {filename}: {str(e)}")
                 else:
-                    processed_count += 1
                     # writing TEI file
                     try:
                         self._write_atomic(filename, text)
                         self.logger.debug(f"Successfully wrote TEI file: {filename}")
+                        # Counted once the TEI is on disk: a failed write
+                        # leaves no output and must not be reported as done
+                        processed_count += 1
 
                         # The document no longer is in error: drop the marker left by
                         # a previous failed run so it is not skipped by --skip-errors.
@@ -1622,6 +1636,7 @@ class GrobidClient(ApiClient):
                                 
                     except OSError as e:
                         self.logger.error(f"Failed to write TEI XML file {filename}: {str(e)}")
+                        error_count += 1
 
         # Calculate batch statistics
         batch_runtime = time.time() - batch_start_time
@@ -2130,6 +2145,9 @@ def main() -> None:
             n = int(args.n)
         except ValueError:
             temp_logger.warning(f"Invalid concurrency parameter n: {args.n}. Using default value n = 10")
+    if n < 1:
+        temp_logger.error(f"Invalid concurrency parameter n: {n}. It must be at least 1")
+        sys.exit(1)
 
     # Initialize GrobidClient which will configure logging based on config.json and verbose flag
     try:
@@ -2143,10 +2161,10 @@ def main() -> None:
         logger = client.logger
     except ServerUnavailableException as e:
         temp_logger.error(f"Server unavailable: {str(e)}")
-        exit(1)
+        sys.exit(1)
     except Exception as e:
         temp_logger.error(f"Failed to initialize GrobidClient: {str(e)}")
-        exit(1)
+        sys.exit(1)
 
     # if output path does not exist, we create it
     if output_path is not None and not os.path.isdir(output_path):
@@ -2156,7 +2174,7 @@ def main() -> None:
             logger.info(f"Successfully created the directory {output_path}")
         except OSError as e:
             logger.error(f"Creation of the directory {output_path} failed: {str(e)}")
-            exit(1)
+            sys.exit(1)
 
     service = args.service
     generate_ids = args.generate_ids
@@ -2172,7 +2190,7 @@ def main() -> None:
 
     if service is None or service not in valid_services:
         logger.error(f"Missing or invalid service '{service}', must be one of {valid_services}")
-        exit(1)
+        sys.exit(1)
 
     # Build the list of inputs from --input and/or --input-list
     inputs = []
@@ -2187,11 +2205,11 @@ def main() -> None:
                         inputs.append(line)
         except OSError as e:
             logger.error(f"Could not read --input-list {input_list}: {str(e)}")
-            exit(1)
+            sys.exit(1)
 
     if not inputs:
         logger.error("No input provided (use --input and/or --input-list)")
-        exit(1)
+        sys.exit(1)
 
     start_time = time.time()
 
@@ -2217,7 +2235,7 @@ def main() -> None:
         )
     except Exception as e:
         logger.error(f"Processing failed: {str(e)}")
-        exit(1)
+        sys.exit(1)
 
     runtime = round(time.time() - start_time, 3)
     print(f"Processing completed in {runtime} seconds")
