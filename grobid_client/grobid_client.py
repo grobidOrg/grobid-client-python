@@ -34,7 +34,7 @@ import shutil
 import tarfile
 import tempfile
 import zipfile
-from typing import Any, BinaryIO, Callable, Optional, Tuple, Union
+from typing import Any, BinaryIO, Callable, List, Optional, Tuple, Union
 import copy
 
 from .format.TEI2LossyJSON import TEI2LossyJSONConverter
@@ -449,10 +449,15 @@ class GrobidClient(ApiClient):
         input_file_path = pathlib.Path(input_file)
 
         if output is not None:
-            # Calculate relative path from input_path, then join with output directory
+            # Mirror the input tree under the output directory: the path of the
+            # file relative to input_path is kept (only the extension changes),
+            # so sub/paper.pdf -> <output>/sub/paper.grobid.tei.xml. Keeping the
+            # subdirectories also prevents two inputs that share a basename
+            # from mapping to the same output file.
             input_path_abs = pathlib.Path(input_path).resolve()
             input_file_rel = input_file_path.resolve().relative_to(input_path_abs)
-            filename = pathlib.Path(output) / f"{input_file_rel.stem}.grobid.tei.xml"
+            filename = pathlib.Path(output) / input_file_rel.with_name(
+                f"{input_file_rel.stem}.grobid.tei.xml")
         else:
             # Use the same directory as the input file
             filename = input_file_path.parent / f"{input_file_path.stem}.grobid.tei.xml"
@@ -629,9 +634,14 @@ class GrobidClient(ApiClient):
 
         # Partition into archives (streamed), remote loose files (s3) and local
         # filesystem files (directories are expanded to their eligible files).
+        # Local files are grouped with the base directory their output paths
+        # are computed from: a directory given as input is the base of the
+        # files found inside it (so the output mirrors its tree), while loose
+        # files (single paths, glob matches) share a common ancestor.
         archive_paths = []
         remote_files = []
-        fs_files = []
+        fs_groups: List[Tuple[str, list]] = []
+        loose_files = []
         for path in matched_paths:
             if self._is_s3(path):
                 if self._looks_like_archive(path):
@@ -643,13 +653,19 @@ class GrobidClient(ApiClient):
             elif self._is_archive(path):
                 archive_paths.append(path)
             elif os.path.isdir(path):
-                fs_files.extend(self._collect_directory_files(path, service))
+                dir_files = self._collect_directory_files(path, service)
+                if dir_files:
+                    fs_groups.append((path, dir_files))
             elif os.path.isfile(path) and self._is_eligible_input(os.path.basename(path), service):
-                fs_files.append(path)
+                loose_files.append(path)
             elif not os.path.exists(path):
                 self.logger.warning(f"Input path does not exist: {path}")
             else:
                 self.logger.debug(f"Skipping input (not an eligible file/dir/archive): {path}")
+
+        if loose_files:
+            fs_groups.append((self._common_base(loose_files), loose_files))
+        fs_files = [f for _, files in fs_groups for f in files]
 
         if not fs_files and not archive_paths and not remote_files:
             self.logger.warning(f"No eligible files found in input(s): {inputs}")
@@ -669,16 +685,17 @@ class GrobidClient(ApiClient):
         # Local files gathered from directories and/or loose glob matches
         if fs_files:
             print(f"Found {len(fs_files)} local file(s) to process")
-            bp, be, bs = self._run_file_batches(
-                service, fs_files, self._common_base(fs_files), output, n,
-                generate_ids, consolidate_header, consolidate_citations,
-                include_raw_citations, include_raw_affiliations, tei_coordinates,
-                segment_sentences, force, verbose, flavor, json_output, markdown_output,
-                skip_errors=skip_errors
-            )
-            processed_files_count += bp
-            errors_files_count += be
-            skipped_files_count += bs
+            for base_dir, group_files in fs_groups:
+                bp, be, bs = self._run_file_batches(
+                    service, group_files, base_dir, output, n,
+                    generate_ids, consolidate_header, consolidate_citations,
+                    include_raw_citations, include_raw_affiliations, tei_coordinates,
+                    segment_sentences, force, verbose, flavor, json_output, markdown_output,
+                    skip_errors=skip_errors
+                )
+                processed_files_count += bp
+                errors_files_count += be
+                skipped_files_count += bs
             total_files += len(fs_files)
 
         # Loose remote (s3) files: streamed into memory one chunk at a time
@@ -1096,8 +1113,9 @@ class GrobidClient(ApiClient):
         the chunk size and nothing but the results ever touches the disk. (The
         exception is ``processCitationList``, whose ``.txt`` inputs are read
         from a path and therefore still go through a temporary directory.)
-        Output files follow the same flat naming convention as directory
-        processing (one ``<stem>`` per result, in ``output``).
+        Output files follow the same naming convention as directory
+        processing: the entry's path inside the archive is mirrored under
+        ``output`` (``nested/y.pdf`` -> ``<output>/nested/y.grobid.tei.xml``).
         """
         start_time = time.time()
         self._warn_on_consolidation_timeout(consolidate_citations)
