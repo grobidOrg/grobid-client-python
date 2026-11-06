@@ -443,7 +443,7 @@ class TestGrobidClient:
         # Mock concurrent.futures.as_completed
         with patch('concurrent.futures.as_completed', return_value=[mock_future]):
             with patch('pathlib.Path'):
-                with patch('builtins.open', mock_open()):
+                with patch.object(GrobidClient, '_write_atomic'):   # the write itself is tested elsewhere
                     with patch('grobid_client.grobid_client.GrobidClient._test_server_connection'):
                         with patch('grobid_client.grobid_client.GrobidClient._configure_logging'):
                             client = GrobidClient(check_server=False)
