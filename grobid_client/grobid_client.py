@@ -215,11 +215,10 @@ class GrobidClient(ApiClient):
                 f"(2-3 minutes is recommended)."
             )
 
-    def _handle_server_busy_retry(self, file_path: str, retry_func: Any, *args: Any, **kwargs: Any) -> Any:
-        """Handle server busy (503) retry logic."""
+    def _wait_for_busy_server(self, file_path: str) -> None:
+        """Pause before re-posting a document the server answered 503 to."""
         self.logger.warning(f"Server busy (503), retrying {file_path} after {self.config['sleep_time']} seconds")
         time.sleep(self.config["sleep_time"])
-        return retry_func(*args, **kwargs)
 
     def _handle_request_error(
             self, file_path: str, error: Exception, error_type: str = "Request"
@@ -1796,89 +1795,77 @@ class GrobidClient(ApiClient):
             start: int = -1,
             end: int = -1
     ) -> Tuple[str, int, Optional[str]]:
-        """Post one document, retrying it from a fresh stream on a 503."""
-        pdf_handle: Optional[BinaryIO] = None
-        try:
-            pdf_handle = open_handle()
+        """Post one document, re-posting it from a fresh stream while the server answers 503.
 
-            files = {
-                "input": (
-                    name,
-                    pdf_handle,
-                    "application/pdf",
-                    {"Expires": "0"},
+        A loop rather than a recursive call: every attempt opens, posts and
+        closes its own stream before the wait, so a server that stays busy
+        costs nothing but time. (Recursing kept one open file per attempt
+        and ended in exhausted descriptors or a RecursionError, recorded as
+        a bogus error marker.)
+        """
+        the_url = self.get_server_url(service)
+
+        # set the GROBID parameters
+        the_data = {}
+        if generate_ids:
+            the_data["generateIDs"] = "1"
+        if consolidate_header:
+            the_data["consolidateHeader"] = "1"
+        if consolidate_citations:
+            the_data["consolidateCitations"] = "1"
+        if include_raw_citations:
+            the_data["includeRawCitations"] = "1"
+        if include_raw_affiliations:
+            the_data["includeRawAffiliations"] = "1"
+        if tei_coordinates:
+            the_data["teiCoordinates"] = self.config["coordinates"]
+        if segment_sentences:
+            the_data["segmentSentences"] = "1"
+        if flavor:
+            the_data["flavor"] = flavor
+        if start and start > 0:
+            the_data["start"] = str(start)
+        if end and end > 0:
+            the_data["end"] = str(end)
+
+        while True:
+            pdf_handle: Optional[BinaryIO] = None
+            try:
+                pdf_handle = open_handle()
+                files = {
+                    "input": (
+                        name,
+                        pdf_handle,
+                        "application/pdf",
+                        {"Expires": "0"},
+                    )
+                }
+                res, status = self.post(
+                    url=the_url, files=files, data=the_data, headers={"Accept": "text/plain"},
+                    timeout=self.config['timeout']
                 )
-            }
+            # requests' exceptions derive from IOError, so they have to be
+            # caught before it or every timeout/connection error would be
+            # reported as a failure to open the file (status 400).
+            except requests.exceptions.ReadTimeout as e:
+                self.logger.error(f"Request timeout for {name}: {str(e)}")
+                return (name, 408, f"Request timeout: {str(e)}")
+            except requests.exceptions.RequestException as e:
+                return self._handle_request_error(name, e)
+            except IOError as e:
+                self.logger.error(f"Failed to open PDF file {name}: {str(e)}")
+                return (name, 400, f"Failed to open file: {str(e)}")
+            except Exception as e:
+                return self._handle_unexpected_error(name, e)
+            finally:
+                # Always ours to close: the caller's own stream is never kept,
+                # only the bytes read out of it.
+                if pdf_handle:
+                    pdf_handle.close()
 
-            the_url = self.get_server_url(service)
-
-            # set the GROBID parameters
-            the_data = {}
-            if generate_ids:
-                the_data["generateIDs"] = "1"
-            if consolidate_header:
-                the_data["consolidateHeader"] = "1"
-            if consolidate_citations:
-                the_data["consolidateCitations"] = "1"
-            if include_raw_citations:
-                the_data["includeRawCitations"] = "1"
-            if include_raw_affiliations:
-                the_data["includeRawAffiliations"] = "1"
-            if tei_coordinates:
-                the_data["teiCoordinates"] = self.config["coordinates"]
-            if segment_sentences:
-                the_data["segmentSentences"] = "1"
-            if flavor:
-                the_data["flavor"] = flavor
-            if start and start > 0:
-                the_data["start"] = str(start)
-            if end and end > 0:
-                the_data["end"] = str(end)
-
-            res, status = self.post(
-                url=the_url, files=files, data=the_data, headers={"Accept": "text/plain"},
-                timeout=self.config['timeout']
-            )
-
-            if status == 503:
-                return self._handle_server_busy_retry(
-                    name,
-                    self._send_pdf,
-                    service,
-                    name,
-                    open_handle,
-                    generate_ids,
-                    consolidate_header,
-                    consolidate_citations,
-                    include_raw_citations,
-                    include_raw_affiliations,
-                    tei_coordinates,
-                    segment_sentences,
-                    flavor,
-                    start,
-                    end
-                )
-
-            return (name, status, res.text)
-
-        # requests' exceptions derive from IOError, so they have to be caught
-        # before it or every timeout/connection error would be reported as a
-        # failure to open the file (status 400).
-        except requests.exceptions.ReadTimeout as e:
-            self.logger.error(f"Request timeout for {name}: {str(e)}")
-            return (name, 408, f"Request timeout: {str(e)}")
-        except requests.exceptions.RequestException as e:
-            return self._handle_request_error(name, e)
-        except IOError as e:
-            self.logger.error(f"Failed to open PDF file {name}: {str(e)}")
-            return (name, 400, f"Failed to open file: {str(e)}")
-        except Exception as e:
-            return self._handle_unexpected_error(name, e)
-        finally:
-            # Always ours to close: the caller's own stream is never kept, only
-            # the bytes read out of it.
-            if pdf_handle:
-                pdf_handle.close()
+            if status != 503:
+                return (name, status, res.text)
+            self._wait_for_busy_server(name)
 
     def process_documents(
             self,
@@ -2011,31 +1998,23 @@ class GrobidClient(ApiClient):
             the_data["includeRawCitations"] = "1"
         the_data["citations"] = references
 
-        try:
-            res, status = self.post(
-                url=the_url, data=the_data, headers={"Accept": "application/xml"}
-            )
-
-            if status == 503:
-                return self._handle_server_busy_retry(
-                    txt_file,
-                    self.process_txt,
-                    service,
-                    txt_file,
-                    generate_ids,
-                    consolidate_header,
-                    consolidate_citations,
-                    include_raw_citations,
-                    include_raw_affiliations,
-                    tei_coordinates,
-                    segment_sentences
+        while True:
+            try:
+                res, status = self.post(
+                    url=the_url, data=the_data, headers={"Accept": "application/xml"},
+                    timeout=self.config['timeout']
                 )
-        except requests.exceptions.RequestException as e:
-            return self._handle_request_error(txt_file, e)
-        except Exception as e:
-            return self._handle_unexpected_error(txt_file, e)
+            except requests.exceptions.ReadTimeout as e:
+                self.logger.error(f"Request timeout for {txt_file}: {str(e)}")
+                return (txt_file, 408, f"Request timeout: {str(e)}")
+            except requests.exceptions.RequestException as e:
+                return self._handle_request_error(txt_file, e)
+            except Exception as e:
+                return self._handle_unexpected_error(txt_file, e)
 
-        return (txt_file, status, res.text)
+            if status != 503:
+                return (txt_file, status, res.text)
+            self._wait_for_busy_server(txt_file)
 
 
 def main() -> None:
