@@ -984,7 +984,12 @@ class GrobidClient(ApiClient):
             return False
         if service == 'processCitationList':
             # The input is a text file with one raw citation per line; a PDF
-            # would be read as text by process_txt and fail.
+            # would be read as text by process_txt and fail. An error marker
+            # (<stem>_<status>.txt, written next to the inputs when no output
+            # directory is given) is not an input either, or a rerun would
+            # post the markers of the previous run as citation lists.
+            if self.ERROR_FILE_RE.search(filename):
+                return False
             return filename.endswith(".txt") or filename.endswith(".TXT")
         if filename.endswith(".pdf") or filename.endswith(".PDF"):
             return True
