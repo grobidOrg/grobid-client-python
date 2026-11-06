@@ -226,6 +226,17 @@ class TestGrobidClient:
 
         assert result == expected
 
+    def test_output_file_name_preserves_subdirectories(self):
+        """The path relative to the input directory is mirrored under the output."""
+        with patch('grobid_client.grobid_client.GrobidClient._test_server_connection'):
+            with patch('grobid_client.grobid_client.GrobidClient._configure_logging'):
+                client = GrobidClient(check_server=False)
+
+        result = client._output_file_name('/input/path/sub/deeper/document.pdf', '/input/path', '/output/path')
+        expected = os.path.join('/output/path', 'sub', 'deeper', 'document.grobid.tei.xml')
+
+        assert result == expected
+
     def test_output_file_name_without_output_path(self):
         """Test _output_file_name method without output path."""
         with patch('grobid_client.grobid_client.GrobidClient._test_server_connection'):
@@ -753,11 +764,13 @@ class TestArchiveInput:
 
     @staticmethod
     def _tei_outputs(output_dir):
+        """TEI outputs under output_dir, as paths relative to it (posix separators)."""
         found = []
         for root, _, files in os.walk(output_dir):
             for f in files:
                 if f.endswith('.grobid.tei.xml'):
-                    found.append(f)
+                    rel = os.path.relpath(os.path.join(root, f), output_dir)
+                    found.append(rel.replace(os.sep, '/'))
         return sorted(found)
 
     def test_is_archive(self):
@@ -798,7 +811,7 @@ class TestArchiveInput:
             posted = self._run(client, zip_path, out)
 
             # all 3 PDFs processed, the .txt ignored
-            assert self._tei_outputs(out) == ['a.grobid.tei.xml', 'b.grobid.tei.xml', 'c.grobid.tei.xml']
+            assert self._tei_outputs(out) == ['a.grobid.tei.xml', 'c.grobid.tei.xml', 'sub/b.grobid.tei.xml']
             # each entry was posted straight from memory, under its archive name
             assert sorted(posted) == [
                 ('a.pdf', b'%PDF-a'),
@@ -813,7 +826,8 @@ class TestArchiveInput:
             self._make_targz(tar_path, {'x.pdf': b'%PDF-x', 'nested/y.pdf': b'%PDF-y'}, d)
             out = os.path.join(d, 'out')
             posted = self._run(client, tar_path, out)
-            assert self._tei_outputs(out) == ['x.grobid.tei.xml', 'y.grobid.tei.xml']
+            # the entry's path inside the archive is mirrored in the output
+            assert self._tei_outputs(out) == ['nested/y.grobid.tei.xml', 'x.grobid.tei.xml']
             assert sorted(posted) == [
                 (os.path.join('nested', 'y.pdf'), b'%PDF-y'),
                 ('x.pdf', b'%PDF-x'),
@@ -855,7 +869,7 @@ class TestArchiveInput:
                     client.process('processFulltextDocument', zip_path, output=out, force=True)
 
             mock_mkdtemp.assert_not_called()
-            assert self._tei_outputs(out) == ['a.grobid.tei.xml', 'b.grobid.tei.xml']
+            assert self._tei_outputs(out) == ['a.grobid.tei.xml', 'sub/b.grobid.tei.xml']
 
     def test_citation_lists_are_still_extracted_to_disk(self):
         """process_txt reads from a path, so citation lists keep the temp-dir route."""
@@ -1039,11 +1053,13 @@ class TestGlobInput:
 
     @staticmethod
     def _tei_outputs(output_dir):
+        """TEI outputs under output_dir, as paths relative to it (posix separators)."""
         found = []
         for root, _, files in os.walk(output_dir):
             for f in files:
                 if f.endswith('.grobid.tei.xml'):
-                    found.append(f)
+                    rel = os.path.relpath(os.path.join(root, f), output_dir)
+                    found.append(rel.replace(os.sep, '/'))
         return sorted(found)
 
     def _run(self, client, pattern, output):
@@ -1085,7 +1101,8 @@ class TestGlobInput:
             open(os.path.join(d, 'sub2', 'note.txt'), 'wb').close()
             out = os.path.join(d, 'out')
             self._run(client, os.path.join(d, '**', '*.pdf'), out)
-            assert self._tei_outputs(out) == ['a.grobid.tei.xml', 'b.grobid.tei.xml']
+            # loose glob matches are placed relative to their common ancestor
+            assert self._tei_outputs(out) == ['sub1/a.grobid.tei.xml', 'sub2/b.grobid.tei.xml']
 
     def test_glob_no_match_warns(self):
         client = self._client()
@@ -1105,6 +1122,107 @@ class TestGlobInput:
             base = client._common_base([f1, f2])
             assert os.path.isdir(base)
             assert f1.startswith(base) and f2.startswith(base)
+
+
+class TestDirectoryInput:
+    """A directory input is mirrored under --output (see issue about flat outputs).
+
+    The TEI of ``<in>/2023/p.pdf`` goes to ``<out>/2023/p.grobid.tei.xml``: the
+    subdirectories are kept, so two documents sharing a basename in different
+    subdirectories do not collide on the same output file.
+    """
+
+    def _client(self, queue_size=50):
+        with patch('grobid_client.grobid_client.GrobidClient._test_server_connection'):
+            with patch('grobid_client.grobid_client.GrobidClient._configure_logging'):
+                client = GrobidClient(check_server=False)
+        client.logger = Mock()
+        client.config['queue_size'] = queue_size
+        return client
+
+    @staticmethod
+    def _touch(*parts):
+        path = os.path.join(*parts)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, 'wb').close()
+        return path
+
+    @staticmethod
+    def _tei_outputs(output_dir):
+        found = []
+        for root, _, files in os.walk(output_dir):
+            for f in files:
+                if f.endswith('.grobid.tei.xml'):
+                    rel = os.path.relpath(os.path.join(root, f), output_dir)
+                    found.append(rel.replace(os.sep, '/'))
+        return sorted(found)
+
+    def _run(self, client, input_dir, output, force=True):
+        posted = []
+
+        def fake_post(url, files=None, data=None, headers=None, timeout=None):
+            posted.append(files['input'][0])
+            resp = Mock()
+            resp.text = '<TEI>ok</TEI>'
+            return (resp, 200)
+
+        with patch.object(GrobidClient, 'post', side_effect=fake_post):
+            client.process('processFulltextDocument', input_dir, output=output, force=force)
+        return posted
+
+    def test_output_mirrors_input_tree(self):
+        client = self._client()
+        with tempfile.TemporaryDirectory() as d:
+            self._touch(d, 'in', 'top.pdf')
+            self._touch(d, 'in', '2023', 'p.pdf')
+            self._touch(d, 'in', '2024', 'p.pdf')       # same basename as 2023/p.pdf
+            self._touch(d, 'in', '2024', 'deep', 'q.pdf')
+            out = os.path.join(d, 'out')
+            posted = self._run(client, os.path.join(d, 'in'), out)
+            assert len(posted) == 4
+            assert self._tei_outputs(out) == [
+                '2023/p.grobid.tei.xml',
+                '2024/deep/q.grobid.tei.xml',
+                '2024/p.grobid.tei.xml',
+                'top.grobid.tei.xml',
+            ]
+
+    def test_same_basename_in_subdirectories_both_skipped_on_rerun(self):
+        """With flat outputs the second p.pdf used to be reported as already done."""
+        client = self._client()
+        with tempfile.TemporaryDirectory() as d:
+            self._touch(d, 'in', '2023', 'p.pdf')
+            self._touch(d, 'in', '2024', 'p.pdf')
+            out = os.path.join(d, 'out')
+            assert len(self._run(client, os.path.join(d, 'in'), out)) == 2
+            # second run without --force: both outputs exist, nothing is posted
+            assert self._run(client, os.path.join(d, 'in'), out, force=False) == []
+            assert self._tei_outputs(out) == ['2023/p.grobid.tei.xml', '2024/p.grobid.tei.xml']
+
+    def test_single_subdirectory_keeps_its_level(self):
+        """The base is the directory given as input, not the common path of the files."""
+        client = self._client()
+        with tempfile.TemporaryDirectory() as d:
+            self._touch(d, 'in', '2024', 'a.pdf')
+            self._touch(d, 'in', '2024', 'b.pdf')
+            out = os.path.join(d, 'out')
+            self._run(client, os.path.join(d, 'in'), out)
+            assert self._tei_outputs(out) == ['2024/a.grobid.tei.xml', '2024/b.grobid.tei.xml']
+
+    def test_trailing_slash_and_relative_input(self):
+        client = self._client()
+        with tempfile.TemporaryDirectory() as d:
+            self._touch(d, 'in', 'sub', 'a.pdf')
+            out = os.path.join(d, 'out')
+            self._run(client, os.path.join(d, 'in') + os.sep, out)
+            assert self._tei_outputs(out) == ['sub/a.grobid.tei.xml']
+
+    def test_no_output_writes_next_to_input(self):
+        client = self._client()
+        with tempfile.TemporaryDirectory() as d:
+            self._touch(d, 'in', 'sub', 'a.pdf')
+            self._run(client, os.path.join(d, 'in'), None)
+            assert os.path.isfile(os.path.join(d, 'in', 'sub', 'a.grobid.tei.xml'))
 
 
 class TestAtomicWrite:

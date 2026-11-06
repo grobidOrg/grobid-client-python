@@ -189,6 +189,9 @@ grobid_client --input "~/data/**/*.pdf"   --output ~/results processFulltextDocu
 
 > [!NOTE]
 > `--input` accepts a directory, a single file, an **archive**, or a **glob pattern**:
+> - **Directories** are processed recursively and the output mirrors the input tree: `~/pdfs/2023/a.pdf` →
+>   `~/results/2023/a.grobid.tei.xml` (subdirectories of `--output` are created as needed, and the JSON/Markdown
+>   outputs and error files sit next to each TEI file). Archives keep their internal paths the same way.
 > - **Archives** (`.zip`, `.tar`, `.tar.gz`/`.tgz`, `.tar.bz2`/`.tbz2`) are streamed: eligible entries are read into
 >   memory in chunks of `queue_size` and sent to GROBID straight from there — the archive is never fully decompressed and
 >   nothing but the results in `--output` ever touches the disk. If `--output` is omitted, results go to a directory named
