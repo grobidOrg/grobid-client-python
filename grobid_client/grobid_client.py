@@ -459,6 +459,7 @@ class GrobidClient(ApiClient):
         input_file_path = pathlib.Path(input_file)
 
         if output is not None:
+            output = os.path.expanduser(output)
             # Mirror the input tree under the output directory: the path of the
             # file relative to input_path is kept (only the extension changes),
             # so sub/paper.pdf -> <output>/sub/paper.grobid.tei.xml. Keeping the
@@ -646,6 +647,12 @@ class GrobidClient(ApiClient):
         of paths). Results from all inputs are aggregated into one summary.
         """
         start_time = time.time()
+
+        # Expanded once here: every path derived from it below (the exists
+        # check, the error markers, the JSON/Markdown siblings) must agree
+        # with the one the TEI is written to.
+        if output is not None:
+            output = os.path.expanduser(output)
 
         # See https://github.com/grobidOrg/grobid-client-python/issues/54
         self._warn_on_consolidation_timeout(consolidate_citations)
@@ -1155,6 +1162,8 @@ class GrobidClient(ApiClient):
         ``output`` (``nested/y.pdf`` -> ``<output>/nested/y.grobid.tei.xml``).
         """
         start_time = time.time()
+        if output is not None:
+            output = os.path.expanduser(output)
         self._warn_on_consolidation_timeout(consolidate_citations)
 
         # Entries are about to be posted from memory with up to n in flight
@@ -2161,7 +2170,7 @@ def main() -> None:
     input_path = args.input
     input_list = args.input_list
     config_path = args.config
-    output_path = args.output
+    output_path = os.path.expanduser(args.output) if args.output is not None else None
     flavor = args.flavor
     json_output = args.json
     markdown_output = args.markdown
