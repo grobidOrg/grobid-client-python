@@ -127,10 +127,11 @@ grobid_client [OPTIONS] SERVICE
 
 #### Common Options
 
-| Option          | Description                                       | Default                 |
-|-----------------|---------------------------------------------------|-------------------------|
-| `--input`       | Input directory path                              | Required                |
-| `--output`      | Output directory path                             | Same as input           |
+| Option          | Description                                                                 | Default                 |
+|-----------------|-----------------------------------------------------------------------------|-------------------------|
+| `--input`       | Input: a directory, a file, an archive, a glob pattern or an `s3://` URI    | One of `--input`/`--input-list` |
+| `--input-list`  | Text file with one input per line (`#` comments allowed); combinable with `--input` | One of `--input`/`--input-list` |
+| `--output`      | Output directory path (the input tree is mirrored under it)                 | Same as input           |
 | `--server`      | GROBID server URL                                 | `http://localhost:8070` |
 | `--n`           | Concurrency level                                 | 10                      |
 | `--config`      | Config file path                                  | Optional                |
@@ -388,14 +389,20 @@ settings.
 {
   "grobid_server": "http://localhost:8070",
   "sleep_time": 5,
-  "timeout": 60,
+  "timeout": 180,
   "coordinates": [
+    "title",
     "persName",
+    "affiliation",
+    "orgName",
+    "formula",
     "figure",
     "ref",
     "biblStruct",
-    "formula",
-    "s"
+    "head",
+    "p",
+    "s",
+    "note"
   ]
 }
 ```
@@ -749,7 +756,7 @@ pytest -v
 
 - `tests/test_client.py` - Unit tests for the base API client
 - `tests/test_grobid_client.py` - Unit tests for the GROBID client
-- `tests/test_integration.py` - Integration tests with real GROBID server
+- `tests/test_integration.py` - Integration-style tests of the processing flow (the server is mocked; no GROBID instance is needed)
 - `tests/conftest.py` - Test configuration and fixtures
 
 ### Continuous Integration
