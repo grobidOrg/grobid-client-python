@@ -684,10 +684,12 @@ class TEI2MarkdownConverter:
         if monogr:
             identifier_sections.append(monogr)
 
-        # Extract identifiers from all sections
+        # Extract the identifiers that sit directly in each section: the
+        # biblStruct itself is one of the sections, so a recursive search on
+        # it would visit the analytic and monogr identifiers a second time
         for section in identifier_sections:
             if section:
-                idnos = section.find_all("idno")
+                idnos = section.find_all("idno", recursive=False)
                 for idno in idnos:
                     id_type = idno.get("type", "").lower()
                     id_value = idno.get_text().strip()
@@ -708,13 +710,13 @@ class TEI2MarkdownConverter:
         if monogr:
             url_sections.append(monogr)
 
-        # Extract URLs from all sections
+        # Extract URLs from all sections (direct children only, see above)
         for section in url_sections:
             if section:
-                ptrs = section.find_all("ptr")
+                ptrs = section.find_all("ptr", recursive=False)
                 for ptr in ptrs:
                     target = ptr.get("target")
-                    if target and target.strip():
+                    if target and target.strip() and target.strip() not in bib_data['urls']:
                         bib_data['urls'].append(target.strip())
 
     def _extract_year(self, date_text: str) -> str:
@@ -772,9 +774,11 @@ class TEI2MarkdownConverter:
         identifiers_and_links = []
 
         # Format DOI if present
+        doi_url = None
         if 'doi' in ref_data['identifiers']:
             doi = ref_data['identifiers']['doi']
-            identifiers_and_links.append(f"https://doi.org/{doi}")
+            doi_url = f"https://doi.org/{doi}"
+            identifiers_and_links.append(doi_url)
 
         # Format other identifiers
         for id_type, id_value in ref_data['identifiers'].items():
@@ -784,8 +788,11 @@ class TEI2MarkdownConverter:
                 elif id_type.lower() in ['isbn', 'issn']:
                     identifiers_and_links.append(f"{id_type.upper()}: {id_value}")
 
-        # Format URLs with display-friendly text
+        # Format URLs with display-friendly text. GROBID's <ptr> for a DOI
+        # is the same doi.org link already printed above: skip it.
         for url in ref_data['urls']:
+            if doi_url and url.rstrip('/').lower() == doi_url.lower():
+                continue
             if url.startswith(('http://', 'https://')):
                 # Extract domain for cleaner display
                 try:

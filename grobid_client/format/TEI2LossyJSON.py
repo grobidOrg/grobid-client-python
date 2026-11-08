@@ -349,9 +349,10 @@ class TEI2LossyJSONConverter:
                     contributor_info['role'] = contributor_element.name
                     contributor_list.append(contributor_info)
 
-        # 4. Process top-level identifiers within biblStruct
-        top_level_identifiers = bibl_struct.find_all("idno")
-        for identifier_element in top_level_identifiers:
+        # 4. Process identifiers that sit directly on the biblStruct. Those
+        # inside <analytic> and <monogr> were collected above; a recursive
+        # search here would record each of them a second time.
+        for identifier_element in bibl_struct.find_all("idno", recursive=False):
             self._process_identifier_element(identifier_element, identifier_collection, 'biblstruct')
 
         # 5. Process notes and supplementary information
@@ -367,9 +368,9 @@ class TEI2LossyJSONConverter:
                 else:
                     supplementary_info.append(note_content)
 
-        # 6. Process pointer elements at biblStruct level
-        biblstruct_pointers = bibl_struct.find_all("ptr")
-        for pointer_element in biblstruct_pointers:
+        # 6. Process pointer elements that sit directly on the biblStruct
+        # (the ones under <analytic>/<monogr> were collected above)
+        for pointer_element in bibl_struct.find_all("ptr", recursive=False):
             self._process_pointer_element(pointer_element, link_references)
 
         # 7. Compile extracted information into final citation structure
@@ -439,7 +440,7 @@ class TEI2LossyJSONConverter:
     def _process_pointer_element(self, pointer_element: Tag, link_references: list[str]) -> None:
         """Process pointer elements that contain external links."""
         pointer_target = pointer_element.get("target", "").strip()
-        if pointer_target:
+        if pointer_target and pointer_target not in link_references:
             link_references.append(pointer_target)
 
     def _process_imprint_details(self, imprint_element: Tag, publication_metadata: dict[str, Any]) -> None:
