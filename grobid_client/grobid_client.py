@@ -824,6 +824,30 @@ class GrobidClient(ApiClient):
         """Return the last path component of an s3:// key."""
         return self._split_s3(uri)[1].rsplit("/", 1)[-1]
 
+    def _s3_common_prefix(self, uris: list) -> str:
+        """Return the key prefix (up to a '/') shared by all the given objects.
+
+        Plays the role _common_base plays for local files: loose remote
+        objects are named relative to it, so pdfs/a/x.pdf and pdfs/b/x.pdf
+        listed under pdfs/ become a/x.pdf and b/x.pdf and do not collide on
+        the same output file.
+        """
+        keys = [self._split_s3(uri)[1] for uri in uris]
+        if not keys:
+            return ""
+        if len(keys) == 1:
+            prefix = keys[0]
+        else:
+            prefix = os.path.commonprefix(keys)
+        return prefix[:prefix.rfind("/") + 1] if "/" in prefix else ""
+
+    def _s3_relative_name(self, uri: str, prefix: str) -> str:
+        """Name a remote object by its key relative to prefix (see above)."""
+        key = self._split_s3(uri)[1]
+        name = key[len(prefix):] if prefix and key.startswith(prefix) else key
+        safe = self._safe_member_path("", name)
+        return safe if safe else self._s3_basename(uri)
+
     def _import_smart_open(self) -> Any:
         try:
             import smart_open  # noqa: F401
@@ -1373,6 +1397,9 @@ class GrobidClient(ApiClient):
 
         queue_size = self._effective_queue_size(n)
         print(f"Found {total} remote file(s) to process")
+        # Objects are named relative to their common prefix so that the
+        # output mirrors the listed "directory", as it does for local ones
+        prefix = self._s3_common_prefix(uris)
         processed_count = 0
         error_count = 0
         skipped_count = 0
@@ -1397,7 +1424,7 @@ class GrobidClient(ApiClient):
                         self.logger.error(f"Failed to fetch {uri}: {str(e)}")
                         error_count += 1
                         continue
-                    document.name = self._s3_basename(uri)
+                    document.name = self._s3_relative_name(uri, prefix)
                     documents.append(document)
 
                 if not documents:
@@ -1434,8 +1461,9 @@ class GrobidClient(ApiClient):
                 for uri in chunk:
                     if verbose:
                         self.logger.info(f"Fetching {uri}")
-                    dest = os.path.join(temp_dir, self._s3_basename(uri))
+                    dest = os.path.join(temp_dir, self._s3_relative_name(uri, prefix))
                     try:
+                        os.makedirs(os.path.dirname(dest), exist_ok=True)
                         with self._s3_open(uri) as src, open(dest, "wb") as out_file:
                             shutil.copyfileobj(src, out_file)
                         local_files.append(dest)
