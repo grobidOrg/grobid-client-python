@@ -1,6 +1,7 @@
 name: Build unstable
 
-on: [push]
+# pull_request so that contributions from forks are tested too
+on: [push, pull_request]
 
 concurrency: 
   group: unstable
@@ -30,8 +31,8 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install --upgrade flake8 pytest pycodestyle pytest-cov pytest-mock "mypy==2.3.*"
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install --upgrade pycodestyle "mypy==2.3.*"
+          pip install -e ".[dev]"
       - name: Lint with flake8
         run: |
           # stop the build if there are Python syntax errors or undefined names

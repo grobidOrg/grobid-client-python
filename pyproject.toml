@@ -20,6 +20,7 @@ maintainers = [
 ]
 description = "Simple python client for GROBID REST services"
 readme = "Readme.md"
+requires-python = ">=3.8"
 
 dynamic = ['version', "dependencies"]
 
@@ -27,6 +28,18 @@ dynamic = ['version', "dependencies"]
 # Streaming inputs directly from S3 (s3:// URIs/prefixes). smart_open provides
 # a seekable, range-streamed reader so remote zips are never fully downloaded.
 s3 = ["smart_open[s3]>=6.0", "boto3"]
+# Everything the test-suite needs (moto mocks S3 for tests/test_s3.py, which
+# is skipped without it). `pip install -e .[dev]` as the Readme says.
+dev = [
+    "pytest",
+    "pytest-cov",
+    "pytest-mock",
+    "mypy",
+    "flake8",
+    "moto[s3]>=4.0",
+    "smart_open[s3]>=6.0",
+    "boto3",
+]
 
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}
