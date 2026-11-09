@@ -618,10 +618,13 @@ class TEI2MarkdownConverter:
 
     def _process_imprint_section(self, imprint: Tag, bib_data: dict[str, Any]) -> None:
         """Process the imprint section containing publication details."""
-        # Extract publication date
-        date = imprint.find("date")
+        # Extract publication date. GROBID often writes it as an attribute
+        # only (<date type="published" when="2019"/>), with no text.
+        date = imprint.find("date", attrs={"type": "published"}) or imprint.find("date")
         if date:
-            bib_data['year'] = self._extract_year(date.get_text().strip())
+            date_value = date.get("when") or date.get_text().strip()
+            if date_value:
+                bib_data['year'] = self._extract_year(date_value)
 
         # Extract publication details from biblScope elements
         for bibl_scope in imprint.find_all("biblScope"):
@@ -786,6 +789,9 @@ class TEI2MarkdownConverter:
                     identifiers_and_links.append(f"{id_type.upper()}: {id_value}")
                 elif id_type.lower() in ['isbn', 'issn']:
                     identifiers_and_links.append(f"{id_type.upper()}: {id_value}")
+                elif id_type.lower() == 'arxiv':
+                    arxiv_id = re.sub(r'^arxiv:\s*', '', id_value, flags=re.IGNORECASE)
+                    identifiers_and_links.append(f"[arXiv:{arxiv_id}](https://arxiv.org/abs/{arxiv_id})")
 
         # Format URLs with display-friendly text. GROBID's <ptr> for a DOI
         # is the same doi.org link already printed above: skip it.
