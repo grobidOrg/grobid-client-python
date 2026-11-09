@@ -1212,6 +1212,30 @@ class GrobidClient(ApiClient):
             processed, errors, skipped, total_files, runtime, skip_errors=skip_errors
         )
 
+    def _archive_member_is_done(self, member_name: str, output: str, force: bool, skip_errors: bool,
+                                json_output: bool, markdown_output: bool) -> bool:
+        """Tell, before reading it, whether an archive entry would be skipped.
+
+        process_batch makes the same decision, but only once it holds the
+        entry's bytes: for an s3:// zip that means downloading every entry a
+        previous run already finished just to skip it. An entry whose TEI is
+        there but whose requested JSON or Markdown is missing is not done:
+        process_batch regenerates those from the TEI.
+        """
+        if force:
+            return False
+        name = self._safe_member_path("", member_name)
+        if name is None:
+            return False  # _read_archive_member reports it
+        filename = self._output_file_name(name, ".", output)
+        if os.path.isfile(filename):
+            if json_output and not os.path.isfile(filename.replace(self.TEI_SUFFIX, '.json')):
+                return False
+            if markdown_output and not os.path.isfile(filename.replace(self.TEI_SUFFIX, '.md')):
+                return False
+            return True
+        return skip_errors and bool(self._find_error_files(filename))
+
     def _process_archive_core(
             self,
             service: str,
@@ -1276,8 +1300,21 @@ class GrobidClient(ApiClient):
             # read straight from the archive into memory and posted from there.
             use_disk = service == 'processCitationList'
 
-            for chunk_start in range(0, total_files, queue_size):
-                chunk = eligible_members[chunk_start:chunk_start + queue_size]
+            # Entries a previous run finished are skipped up front, so that a
+            # resumed run does not read (for s3, download) them again
+            pending_members = [
+                name for name in eligible_members
+                if not self._archive_member_is_done(name, output, force, skip_errors,
+                                                    json_output, markdown_output)
+            ]
+            skipped_files_count += total_files - len(pending_members)
+            if skipped_files_count:
+                self.logger.info(
+                    f"{skipped_files_count} file(s) in {archive_path} already processed, skipping "
+                    f"(use --force to reprocess them)")
+
+            for chunk_start in range(0, len(pending_members), queue_size):
+                chunk = pending_members[chunk_start:chunk_start + queue_size]
 
                 if not use_disk:
                     documents = []
