@@ -19,14 +19,10 @@ from typing import Any, Dict, Union, BinaryIO, Iterator
 import dateparser
 from bs4 import BeautifulSoup, Tag
 
-# Configure module-level logger
+# Module-level logger. Handlers and levels are the application's business:
+# configuring the root logger at import time would override the logging
+# set up by whoever imports this module (the format CLIs included).
 logger: logging.Logger = logging.getLogger(__name__)
-logger.propagate = False  # Prevent propagation to avoid duplicate logs
-
-# Only configure basic logging if nothing is set up yet
-if not logger.handlers and not logging.getLogger().handlers:
-    # Basic configuration if not already configured by the application
-    logging.basicConfig(level=logging.INFO)
 
 
 class TEI2LossyJSONConverter:

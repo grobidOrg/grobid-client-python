@@ -20,11 +20,10 @@ from bs4 import BeautifulSoup, NavigableString, Tag
 import logging
 from datetime import datetime
 
-# Configure module-level logger
+# Module-level logger. Handlers and levels are the application's business:
+# configuring the root logger at import time would override the logging
+# set up by whoever imports this module (the format CLIs included).
 logger = logging.getLogger(__name__)
-if not logger.handlers:
-    # Basic configuration if not already configured by the application
-    logging.basicConfig(level=logging.INFO)
 
 
 class TEI2MarkdownConverter:
