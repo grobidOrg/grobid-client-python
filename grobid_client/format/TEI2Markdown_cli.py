@@ -63,13 +63,13 @@ def main() -> None:
         epilog="""
 Examples:
   # Convert a single TEI file
-  python -m grobid_client.format.TEI2Markdown --input input.tei.xml --output output.md
+  python -m grobid_client.format TEI2Markdown --input input.tei.xml --output output.md
 
   # Convert with verbose logging
-  python -m grobid_client.format.TEI2Markdown --input input.tei.xml --output output.md --verbose
+  python -m grobid_client.format TEI2Markdown --input input.tei.xml --output output.md --verbose
 
   # Convert and output to stdout
-  python -m grobid_client.format.TEI2Markdown --input input.tei.xml
+  python -m grobid_client.format TEI2Markdown --input input.tei.xml
         """
     )
 
