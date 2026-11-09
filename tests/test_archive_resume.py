@@ -115,3 +115,17 @@ def test_previous_failure_is_not_read_with_skip_errors(archive, tmp_path):
     assert counts == (4, 0, 0, 4)
     read, _ = _run(client, archive, out)  # without --skip_errors it is retried
     assert read == ["a.pdf"]
+
+
+def test_ctrl_c_exits_cleanly_with_a_resume_hint(monkeypatch, tmp_path):
+    from grobid_client import grobid_client as gc_module
+    logged = []
+    fake_client = Mock()
+    fake_client.process_paths.side_effect = KeyboardInterrupt
+    fake_client.logger.error.side_effect = logged.append
+    monkeypatch.setattr(gc_module, "GrobidClient", Mock(return_value=fake_client))
+    monkeypatch.setattr("sys.argv", ["grobid_client", "--input", str(tmp_path), "processFulltextDocument"])
+    with pytest.raises(SystemExit) as exit_info:
+        gc_module.main()
+    assert exit_info.value.code == 130
+    assert any("run the same command again" in message for message in logged)

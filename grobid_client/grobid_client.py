@@ -2325,6 +2325,11 @@ def main() -> None:
             markdown_output=markdown_output,
             skip_errors=skip_errors
         )
+    except KeyboardInterrupt:
+        # Outputs are written atomically and finished documents are skipped
+        # on the next run, so an interrupted run loses only work in flight
+        logger.error("Interrupted. Finished documents are kept: run the same command again to resume.")
+        sys.exit(130)
     except Exception as e:
         logger.error(f"Processing failed: {str(e)}")
         sys.exit(1)
