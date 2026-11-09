@@ -44,14 +44,16 @@ class JSONReferenceValidator:
         }
 
     def validate_directory(self, directory_path: str) -> Dict[str, Any]:
-        """Validate all JSON files in a directory or a single JSON file."""
+        """Validate all JSON files under a directory (recursively) or a single JSON file."""
         # Check if it's a single file
         if os.path.isfile(directory_path):
             if not directory_path.endswith('.json'):
                 raise ValueError(f"File must be a JSON file: {directory_path}")
             json_files = [Path(directory_path)]
         elif os.path.isdir(directory_path):
-            json_files = list(Path(directory_path).glob("*.json"))
+            # The client mirrors the input tree, so the converted files of a
+            # recursive run sit in subdirectories of the output directory
+            json_files = sorted(Path(directory_path).rglob("*.json"))
         else:
             raise ValueError(f"Path does not exist: {directory_path}")
 
@@ -96,10 +98,22 @@ class JSONReferenceValidator:
             'warnings': []
         }
 
+        if not isinstance(data, dict):
+            error_msg = f"{file_path}: not a converted document (top-level JSON {type(data).__name__})"
+            self.results['errors'].append(error_msg)
+            self.results['invalid_files'] += 1
+            if self.verbose:
+                print(f"❌ {error_msg}")
+            return
+
         # Validate different parts of the JSON structure
         self._validate_body_text_refs(data, file_result)
         self._validate_abstract_refs(data, file_result)
         self._validate_other_sections(data, file_result)
+
+        # A file with a single bad reference is not a valid file
+        if file_result['invalid_refs'] > 0:
+            file_result['valid'] = False
 
         # Update overall results
         self.results['total_refs'] += file_result['total_refs']
@@ -141,10 +155,9 @@ class JSONReferenceValidator:
 
     def _validate_abstract_refs(self, data: Dict[str, Any], file_result: Dict[str, Any]) -> None:
         """Validate references in abstract section."""
-        if 'biblio' not in data or 'abstract' not in data['biblio']:
-            return
+        abstract = (data.get('biblio') or {}).get('abstract') or []
 
-        for i, paragraph in enumerate(data['biblio']['abstract']):
+        for i, paragraph in enumerate(abstract):
             if 'text' not in paragraph or 'refs' not in paragraph:
                 continue
 
@@ -298,14 +311,14 @@ class JSONReferenceValidator:
             json.dump(report_data, f, indent=2, ensure_ascii=False)
 
 
-def main() -> None:
+def main() -> int:
     """Main function."""
     parser = argparse.ArgumentParser(
         description="Validate reference offsets in JSON files generated from TEI documents"
     )
     parser.add_argument(
         "directory",
-        help="Directory containing JSON files to validate"
+        help="JSON file, or directory searched recursively for JSON files, to validate"
     )
     parser.add_argument(
         "--verbose", "-v",
