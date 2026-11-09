@@ -18,6 +18,7 @@ from typing import Any, Dict, Union, BinaryIO, Iterator
 
 import dateparser
 from bs4 import BeautifulSoup, Tag
+from bs4.element import CData, PreformattedString
 
 # Module-level logger. Handlers and levels are the application's business:
 # configuring the root logger at import time would override the logging
@@ -979,6 +980,11 @@ def get_refs_with_offsets(element):
                     if child_text is not None:
                         parts.append(child_text)
                 return "".join(parts), pos
+        elif isinstance(node, PreformattedString) and not isinstance(node, CData):
+            # Comments, processing instructions and declarations are not
+            # part of get_text(), which gives the passage its text: counting
+            # them here would shift every offset after them
+            return "", pos
         else:
             s = str(node)
             return s, pos + len(s)
