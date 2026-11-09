@@ -845,7 +845,7 @@ class TEI2LossyJSONConverter:
         # Use processes for CPU-bound parsing when many files are available
         workers = workers or min(32, (os.cpu_count() or 1))
         with ProcessPoolExecutor(max_workers=workers) as ex:
-            futures = {ex.submit(_convert_file_worker, str(f)): f for f in files}
+            futures = {ex.submit(_convert_file_worker, str(f), self.validate_refs): f for f in files}
             for fut in as_completed(futures):
                 f = futures[fut]
                 try:
@@ -856,15 +856,9 @@ class TEI2LossyJSONConverter:
                 yield {"path": f, "document": doc}
 
 
-def _convert_file_worker(path: str) -> Any:
-    """Worker used by ProcessPoolExecutor. Imports inside function to avoid pickling issues."""
-    from bs4 import BeautifulSoup
-    # Reuse existing top-level helpers from this module by importing here
-    with open(path, 'r') as f:
-        content = f.read()
-    soup = BeautifulSoup(content, 'xml')
-    converter = TEI2LossyJSONConverter()
-    return converter.convert_tei_file(path, stream=False)
+def _convert_file_worker(path: str, validate_refs: bool = True) -> Any:
+    """Worker used by ProcessPoolExecutor: convert one file with the caller's settings."""
+    return TEI2LossyJSONConverter(validate_refs=validate_refs).convert_tei_file(path, stream=False)
 
 
 def box_to_dict(coord_list: list[str]) -> dict[str, float]:
