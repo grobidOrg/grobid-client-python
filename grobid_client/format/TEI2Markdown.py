@@ -452,22 +452,29 @@ class TEI2MarkdownConverter:
 
     def _table_to_markdown(self, table_element: Tag) -> str:
         """Convert a table element to simple markdown."""
-        markdown_lines = []
-        
-        # Process table rows
+        rows = []
         for row in table_element.find_all("row"):
-            cells = []
-            for cell in row.find_all("cell"):
-                cell_text = cell.get_text().strip()
-                cells.append(cell_text)
-            
+            # A cell is one line of a table row: collapse its line breaks and
+            # escape the pipes that would otherwise end the cell early
+            cells = [re.sub(r"\s+", " ", cell.get_text()).strip().replace("|", "\\|")
+                     for cell in row.find_all("cell")]
             if cells:
-                markdown_lines.append("| " + " | ".join(cells) + " |")
-                if len(markdown_lines) == 1:
-                    # a separator after the first row makes it a Markdown table
-                    markdown_lines.append("|" + "|".join([" --- "] * len(cells)) + "|")
+                rows.append(cells)
+        if not rows:
+            return ""
 
-        return "\n".join(markdown_lines) if markdown_lines else ""
+        # Every row gets as many cells as the widest one: renderers drop the
+        # cells of a row that go past the separator row's column count
+        width = max(len(cells) for cells in rows)
+        markdown_lines = []
+        for cells in rows:
+            cells = cells + [""] * (width - len(cells))
+            markdown_lines.append("| " + " | ".join(cells) + " |")
+            if len(markdown_lines) == 1:
+                # a separator after the first row makes it a Markdown table
+                markdown_lines.append("|" + "|".join([" --- "] * width) + "|")
+
+        return "\n".join(markdown_lines)
 
     def _format_reference(self, bibl_struct: Tag, ref_num: int) -> str:
         """
