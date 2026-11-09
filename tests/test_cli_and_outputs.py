@@ -99,7 +99,7 @@ class TestMain:
                 '--generate_ids', '--consolidate_header', '--consolidate_citations',
                 '--include_raw_citations', '--include_raw_affiliations', '--force',
                 '--skip_errors', '--tei_coordinates', '--segment_sentences', '--verbose',
-                '--flavor', 'article/light', '--json', '--markdown',
+                '--flavor', 'article/light', '--json', '--markdown', '--no-sign-request',
                 'processFulltextDocument',
             ])
             pp.assert_called_once()
@@ -115,6 +115,7 @@ class TestMain:
                 'markdown_output': True, 'skip_errors': True,
             }
             assert constructed == {'config_path': 'my.json', 'verbose': True,
+                                   's3_no_sign_request': True,
                                    'grobid_server': 'http://srv:8070'}
 
     def test_defaults_when_no_flag_is_given(self):
@@ -130,7 +131,8 @@ class TestMain:
                          'json_output', 'markdown_output', 'skip_errors'):
                 assert kwargs[flag] is False, flag
             # the server is only overridden when given on the command line
-            assert constructed == {'config_path': None, 'verbose': False}
+            assert constructed == {'config_path': None, 'verbose': False,
+                                   's3_no_sign_request': False}
 
     def test_camel_case_aliases(self):
         """--teiCoordinates, --generateIDs, --segmentSentences, --skip-errors."""

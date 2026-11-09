@@ -132,10 +132,15 @@ class GrobidClient(ApiClient):
             timeout: Optional[int] = None,
             config_path: Optional[str] = None,
             check_server: bool = True,
-            verbose: bool = False
+            verbose: bool = False,
+            s3_no_sign_request: bool = False
     ) -> None:
         # Store verbose parameter for logging configuration
         self.verbose = verbose
+        # Read s3:// inputs anonymously (public buckets, like the AWS CLI's
+        # --no-sign-request) instead of with the default credential chain
+        self.s3_no_sign_request = s3_no_sign_request
+        self._s3_client_instance: Any = None
 
         # Initialize config with defaults
         self.config = copy.deepcopy(self.DEFAULT_CONFIG)
@@ -867,13 +872,30 @@ class GrobidClient(ApiClient):
                 "Install it with: pip install grobid-client-python[s3]"
             ) from e
 
+    def _s3_client(self) -> Any:
+        """Return the boto3 S3 client shared by listing and reading.
+
+        With ``s3_no_sign_request`` requests go out unsigned, which is how
+        public buckets are read without AWS credentials. boto3 clients are
+        thread-safe, so one client serves every worker.
+        """
+        if self._s3_client_instance is None:
+            boto3 = self._import_boto3()
+            if self.s3_no_sign_request:
+                from botocore import UNSIGNED
+                from botocore.config import Config
+                self._s3_client_instance = boto3.client("s3", config=Config(signature_version=UNSIGNED))
+            else:
+                self._s3_client_instance = boto3.client("s3")
+        return self._s3_client_instance
+
     def _s3_open(self, uri: str) -> BinaryIO:
         """Open an S3 object as a seekable binary stream (HTTP range-streamed).
 
         The returned stream lets zipfile read only the central directory and the
         requested entries, so a remote zip is never fully downloaded.
         """
-        return self._import_smart_open().open(uri, "rb")
+        return self._import_smart_open().open(uri, "rb", transport_params={"client": self._s3_client()})
 
     def _resolve_s3_paths(self, uri: str) -> list:
         """Resolve an s3:// object/prefix/glob into a sorted list of object URIs.
@@ -897,7 +919,7 @@ class GrobidClient(ApiClient):
         else:
             return [uri]  # a concrete object key
 
-        s3 = self._import_boto3().client("s3")
+        s3 = self._s3_client()
         keys = []
         for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
             for obj in page.get("Contents", []):
@@ -1014,12 +1036,11 @@ class GrobidClient(ApiClient):
             if self.ERROR_FILE_RE.search(filename):
                 return False
             return filename.endswith(".txt") or filename.endswith(".TXT")
-        if filename.endswith(".pdf") or filename.endswith(".PDF"):
-            return True
-        if service == 'processCitationPatentST36' and (
-                filename.endswith(".xml") or filename.endswith(".XML")):
-            return True
-        return False
+        if service == 'processCitationPatentST36':
+            # ST.36 patent documents are XML; GROBID answers a PDF posted
+            # there with 204 No Content, which became an error marker
+            return filename.endswith(".xml") or filename.endswith(".XML")
+        return filename.endswith(".pdf") or filename.endswith(".PDF")
 
     def _looks_like_archive(self, path: str) -> bool:
         """Return True if the path/URI name has a known archive extension."""
@@ -1213,6 +1234,30 @@ class GrobidClient(ApiClient):
             processed, errors, skipped, total_files, runtime, skip_errors=skip_errors
         )
 
+    def _archive_member_is_done(self, member_name: str, output: str, force: bool, skip_errors: bool,
+                                json_output: bool, markdown_output: bool) -> bool:
+        """Tell, before reading it, whether an archive entry would be skipped.
+
+        process_batch makes the same decision, but only once it holds the
+        entry's bytes: for an s3:// zip that means downloading every entry a
+        previous run already finished just to skip it. An entry whose TEI is
+        there but whose requested JSON or Markdown is missing is not done:
+        process_batch regenerates those from the TEI.
+        """
+        if force:
+            return False
+        name = self._safe_member_path("", member_name)
+        if name is None:
+            return False  # _read_archive_member reports it
+        filename = self._output_file_name(name, ".", output)
+        if os.path.isfile(filename):
+            if json_output and not os.path.isfile(filename.replace(self.TEI_SUFFIX, '.json')):
+                return False
+            if markdown_output and not os.path.isfile(filename.replace(self.TEI_SUFFIX, '.md')):
+                return False
+            return True
+        return skip_errors and bool(self._find_error_files(filename))
+
     def _process_archive_core(
             self,
             service: str,
@@ -1277,8 +1322,21 @@ class GrobidClient(ApiClient):
             # read straight from the archive into memory and posted from there.
             use_disk = service == 'processCitationList'
 
-            for chunk_start in range(0, total_files, queue_size):
-                chunk = eligible_members[chunk_start:chunk_start + queue_size]
+            # Entries a previous run finished are skipped up front, so that a
+            # resumed run does not read (for s3, download) them again
+            pending_members = [
+                name for name in eligible_members
+                if not self._archive_member_is_done(name, output, force, skip_errors,
+                                                    json_output, markdown_output)
+            ]
+            skipped_files_count += total_files - len(pending_members)
+            if skipped_files_count:
+                self.logger.info(
+                    f"{skipped_files_count} file(s) in {archive_path} already processed, skipping "
+                    f"(use --force to reprocess them)")
+
+            for chunk_start in range(0, len(pending_members), queue_size):
+                chunk = pending_members[chunk_start:chunk_start + queue_size]
 
                 if not use_disk:
                     documents = []
@@ -2176,6 +2234,12 @@ def main() -> None:
         action="store_true",
         help="Convert TEI output to Markdown format",
     )
+    parser.add_argument(
+        "--no-sign-request",
+        dest="no_sign_request",
+        action="store_true",
+        help="read s3:// inputs anonymously, without AWS credentials (for public buckets, as the AWS CLI option of the same name)",
+    )
 
     args = parser.parse_args()
 
@@ -2201,7 +2265,8 @@ def main() -> None:
     # Initialize GrobidClient which will configure logging based on config.json and verbose flag
     try:
         # Only pass grobid_server if it was explicitly provided (not the default)
-        client_kwargs = {'config_path': config_path, 'verbose': args.verbose}
+        client_kwargs = {'config_path': config_path, 'verbose': args.verbose,
+                         's3_no_sign_request': args.no_sign_request}
         if args.server is not None:  # Only override if user specified a different server
             client_kwargs['grobid_server'] = args.server
 
@@ -2260,6 +2325,13 @@ def main() -> None:
         logger.error("No input provided (use --input and/or --input-list)")
         sys.exit(1)
 
+    # A mistyped --input used to log a warning and exit 0, which a script
+    # cannot tell from a run that had nothing left to do
+    if (input_path is not None and not input_path.startswith("s3://")
+            and not glob.has_magic(input_path) and not os.path.exists(os.path.expanduser(input_path))):
+        logger.error(f"Input path does not exist: {input_path}")
+        sys.exit(1)
+
     start_time = time.time()
 
     try:
@@ -2282,8 +2354,15 @@ def main() -> None:
             markdown_output=markdown_output,
             skip_errors=skip_errors
         )
+    except KeyboardInterrupt:
+        # Outputs are written atomically and finished documents are skipped
+        # on the next run, so an interrupted run loses only work in flight
+        logger.error("Interrupted. Finished documents are kept: run the same command again to resume.")
+        sys.exit(130)
     except Exception as e:
         logger.error(f"Processing failed: {str(e)}")
+        if type(e).__name__ == "NoCredentialsError" and not args.no_sign_request:
+            logger.error("To read a public s3:// bucket without AWS credentials, add --no-sign-request")
         sys.exit(1)
 
     runtime = round(time.time() - start_time, 3)

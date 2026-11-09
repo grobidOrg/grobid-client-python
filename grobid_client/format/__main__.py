@@ -5,15 +5,14 @@ This provides a menu to choose between TEI2LossyJSON and TEI2Markdown converters
 """
 from __future__ import annotations
 
-import argparse
 import sys
 
 
 def main() -> None:
     """Main entry point that provides a menu for converter selection."""
 
-    # Check if a converter was specified
-    if len(sys.argv) < 2:
+    # Without a converter, print the menu; asking for help gets it too
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
         print("GROBID format converters - Choose a converter to run")
         print("\nUsage:")
         print("  python -m grobid_client.format <converter> [options]")
@@ -26,7 +25,7 @@ def main() -> None:
         print("\nGet help for specific converter:")
         print("  python -m grobid_client.format TEI2LossyJSON --help")
         print("  python -m grobid_client.format TEI2Markdown --help")
-        sys.exit(1)
+        sys.exit(0 if len(sys.argv) >= 2 else 1)
 
     converter = sys.argv[1]
 
@@ -41,8 +40,8 @@ def main() -> None:
         sys.argv = ["TEI2Markdown"] + sys.argv[2:]
         markdown_main()
     else:
-        print(f"Unknown converter: {converter}")
-        print("Available converters: TEI2LossyJSON, TEI2Markdown")
+        print(f"Unknown converter: {converter}", file=sys.stderr)
+        print("Available converters: TEI2LossyJSON, TEI2Markdown", file=sys.stderr)
         sys.exit(1)
 
 

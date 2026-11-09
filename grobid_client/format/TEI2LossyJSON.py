@@ -18,15 +18,12 @@ from typing import Any, Dict, Union, BinaryIO, Iterator
 
 import dateparser
 from bs4 import BeautifulSoup, Tag
+from bs4.element import CData, PreformattedString
 
-# Configure module-level logger
+# Module-level logger. Handlers and levels are the application's business:
+# configuring the root logger at import time would override the logging
+# set up by whoever imports this module (the format CLIs included).
 logger: logging.Logger = logging.getLogger(__name__)
-logger.propagate = False  # Prevent propagation to avoid duplicate logs
-
-# Only configure basic logging if nothing is set up yet
-if not logger.handlers and not logging.getLogger().handlers:
-    # Basic configuration if not already configured by the application
-    logging.basicConfig(level=logging.INFO)
 
 
 class TEI2LossyJSONConverter:
@@ -147,7 +144,9 @@ class TEI2LossyJSONConverter:
                                 [
                                     {
                                         "id": sentence.get("xml:id") if sentence.has_attr("xml:id") else id,
-                                        "text": sentence.text,
+                                        # the same whitespace normalisation the
+                                        # ref offsets are computed against
+                                        "text": _normalise_passage_text(sentence.get_text()),
                                         "coords": [
                                             box_to_dict(coord.split(","))
                                             for coord in sentence['coords'].split(";")
@@ -162,7 +161,7 @@ class TEI2LossyJSONConverter:
                             biblio_structure["abstract"] = [
                                 {
                                     "id": id,
-                                    "text": paragraph.text,
+                                    "text": _normalise_passage_text(paragraph.get_text()),
                                     "coords": [
                                         box_to_dict(coord.split(","))
                                         for coord in paragraph['coords'].split(";")
@@ -554,17 +553,13 @@ class TEI2LossyJSONConverter:
                 citation_data['urls'] = links
 
     def _validate_citation_content(self, citation_data: dict[str, Any]) -> bool:
-        """Validate that the citation contains meaningful information."""
-        # Check for essential bibliographic elements
-        essential_elements = ['title', 'authors', 'journal', 'doi', 'isbn', 'issn', 'pmc', 'pmid']
+        """Validate that the citation carries any information beyond its id.
 
-        # Check if any essential element is present
-        has_essential = any(citation_data.get(element) for element in essential_elements)
-
-        # Check for fallback elements
-        has_fallback = any(citation_data.get(element) for element in ['raw_reference', 'reference_text'])
-
-        return has_essential or has_fallback
+        A shortlist of "essential" fields used to decide this, which dropped
+        entries GROBID describes with an arXiv id, a URL, editors or a date
+        only, and left the in-text references pointing at them dangling.
+        """
+        return any(value for key, value in citation_data.items() if key not in ('id', 'target'))
 
     def _extract_person_data(self, person_element: Tag) -> dict[str, Any] | None:
         """
@@ -852,7 +847,7 @@ class TEI2LossyJSONConverter:
         # Use processes for CPU-bound parsing when many files are available
         workers = workers or min(32, (os.cpu_count() or 1))
         with ProcessPoolExecutor(max_workers=workers) as ex:
-            futures = {ex.submit(_convert_file_worker, str(f)): f for f in files}
+            futures = {ex.submit(_convert_file_worker, str(f), self.validate_refs): f for f in files}
             for fut in as_completed(futures):
                 f = futures[fut]
                 try:
@@ -863,15 +858,9 @@ class TEI2LossyJSONConverter:
                 yield {"path": f, "document": doc}
 
 
-def _convert_file_worker(path: str) -> Any:
-    """Worker used by ProcessPoolExecutor. Imports inside function to avoid pickling issues."""
-    from bs4 import BeautifulSoup
-    # Reuse existing top-level helpers from this module by importing here
-    with open(path, 'r') as f:
-        content = f.read()
-    soup = BeautifulSoup(content, 'xml')
-    converter = TEI2LossyJSONConverter()
-    return converter.convert_tei_file(path, stream=False)
+def _convert_file_worker(path: str, validate_refs: bool = True) -> Any:
+    """Worker used by ProcessPoolExecutor: convert one file with the caller's settings."""
+    return TEI2LossyJSONConverter(validate_refs=validate_refs).convert_tei_file(path, stream=False)
 
 
 def box_to_dict(coord_list: list[str]) -> dict[str, float]:
@@ -983,6 +972,11 @@ def get_refs_with_offsets(element):
                     if child_text is not None:
                         parts.append(child_text)
                 return "".join(parts), pos
+        elif isinstance(node, PreformattedString) and not isinstance(node, CData):
+            # Comments, processing instructions and declarations are not
+            # part of get_text(), which gives the passage its text: counting
+            # them here would shift every offset after them
+            return "", pos
         else:
             s = str(node)
             return s, pos + len(s)
@@ -1018,17 +1012,21 @@ def get_refs_with_offsets(element):
     return final_refs
 
 
+def _normalise_passage_text(text: str) -> str:
+    """Collapse whitespace runs and strip: the text that ref offsets index into.
+
+    get_refs_with_offsets maps its offsets onto exactly this normalisation, so
+    every passage carrying refs must have its text built with it.
+    """
+    if not text:
+        return ""
+    # DO NOT call html.unescape(text) here, to maintain parity and prevent offset corruption.
+    return re.sub(r'\s+', ' ', text.strip())
+
+
 def get_formatted_passage(head_paragraph: str | None, head_section: str | None, paragraph_id: str, element: Tag) -> dict[str, Any]:
     """Format a passage (paragraph or sentence) with metadata and references."""
-    # Import the clean_text method
-    def _clean_text_local(text: str) -> str:
-        if not text:
-            return ""
-        text = re.sub(r'\s+', ' ', text.strip())
-        # DO NOT call html.unescape(text) here either, to maintain parity and prevent offset corruption.
-        return text
-
-    text = _clean_text_local(element.get_text())
+    text = _normalise_passage_text(element.get_text())
     refs = get_refs_with_offsets(element)
 
     passage = {

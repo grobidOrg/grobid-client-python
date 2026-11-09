@@ -64,13 +64,13 @@ def main() -> None:
         epilog="""
 Examples:
   # Convert a single TEI file
-  python -m grobid_client.format.TEI2LossyJSON --input input.tei.xml --output output.json
+  python -m grobid_client.format TEI2LossyJSON --input input.tei.xml --output output.json
 
   # Convert with verbose logging
-  python -m grobid_client.format.TEI2LossyJSON --input input.tei.xml --output output.json --verbose
+  python -m grobid_client.format TEI2LossyJSON --input input.tei.xml --output output.json --verbose
 
   # Convert and output to stdout
-  python -m grobid_client.format.TEI2LossyJSON --input input.tei.xml
+  python -m grobid_client.format TEI2LossyJSON --input input.tei.xml
         """
     )
 
