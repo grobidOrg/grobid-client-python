@@ -132,10 +132,15 @@ class GrobidClient(ApiClient):
             timeout: Optional[int] = None,
             config_path: Optional[str] = None,
             check_server: bool = True,
-            verbose: bool = False
+            verbose: bool = False,
+            s3_no_sign_request: bool = False
     ) -> None:
         # Store verbose parameter for logging configuration
         self.verbose = verbose
+        # Read s3:// inputs anonymously (public buckets, like the AWS CLI's
+        # --no-sign-request) instead of with the default credential chain
+        self.s3_no_sign_request = s3_no_sign_request
+        self._s3_client_instance: Any = None
 
         # Initialize config with defaults
         self.config = copy.deepcopy(self.DEFAULT_CONFIG)
@@ -867,13 +872,30 @@ class GrobidClient(ApiClient):
                 "Install it with: pip install grobid-client-python[s3]"
             ) from e
 
+    def _s3_client(self) -> Any:
+        """Return the boto3 S3 client shared by listing and reading.
+
+        With ``s3_no_sign_request`` requests go out unsigned, which is how
+        public buckets are read without AWS credentials. boto3 clients are
+        thread-safe, so one client serves every worker.
+        """
+        if self._s3_client_instance is None:
+            boto3 = self._import_boto3()
+            if self.s3_no_sign_request:
+                from botocore import UNSIGNED
+                from botocore.config import Config
+                self._s3_client_instance = boto3.client("s3", config=Config(signature_version=UNSIGNED))
+            else:
+                self._s3_client_instance = boto3.client("s3")
+        return self._s3_client_instance
+
     def _s3_open(self, uri: str) -> BinaryIO:
         """Open an S3 object as a seekable binary stream (HTTP range-streamed).
 
         The returned stream lets zipfile read only the central directory and the
         requested entries, so a remote zip is never fully downloaded.
         """
-        return self._import_smart_open().open(uri, "rb")
+        return self._import_smart_open().open(uri, "rb", transport_params={"client": self._s3_client()})
 
     def _resolve_s3_paths(self, uri: str) -> list:
         """Resolve an s3:// object/prefix/glob into a sorted list of object URIs.
@@ -897,7 +919,7 @@ class GrobidClient(ApiClient):
         else:
             return [uri]  # a concrete object key
 
-        s3 = self._import_boto3().client("s3")
+        s3 = self._s3_client()
         keys = []
         for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
             for obj in page.get("Contents", []):
@@ -2212,6 +2234,12 @@ def main() -> None:
         action="store_true",
         help="Convert TEI output to Markdown format",
     )
+    parser.add_argument(
+        "--no-sign-request",
+        dest="no_sign_request",
+        action="store_true",
+        help="read s3:// inputs anonymously, without AWS credentials (for public buckets, as the AWS CLI option of the same name)",
+    )
 
     args = parser.parse_args()
 
@@ -2237,7 +2265,8 @@ def main() -> None:
     # Initialize GrobidClient which will configure logging based on config.json and verbose flag
     try:
         # Only pass grobid_server if it was explicitly provided (not the default)
-        client_kwargs = {'config_path': config_path, 'verbose': args.verbose}
+        client_kwargs = {'config_path': config_path, 'verbose': args.verbose,
+                         's3_no_sign_request': args.no_sign_request}
         if args.server is not None:  # Only override if user specified a different server
             client_kwargs['grobid_server'] = args.server
 
@@ -2332,6 +2361,8 @@ def main() -> None:
         sys.exit(130)
     except Exception as e:
         logger.error(f"Processing failed: {str(e)}")
+        if type(e).__name__ == "NoCredentialsError" and not args.no_sign_request:
+            logger.error("To read a public s3:// bucket without AWS credentials, add --no-sign-request")
         sys.exit(1)
 
     runtime = round(time.time() - start_time, 3)
