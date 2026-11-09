@@ -1014,12 +1014,11 @@ class GrobidClient(ApiClient):
             if self.ERROR_FILE_RE.search(filename):
                 return False
             return filename.endswith(".txt") or filename.endswith(".TXT")
-        if filename.endswith(".pdf") or filename.endswith(".PDF"):
-            return True
-        if service == 'processCitationPatentST36' and (
-                filename.endswith(".xml") or filename.endswith(".XML")):
-            return True
-        return False
+        if service == 'processCitationPatentST36':
+            # ST.36 patent documents are XML; GROBID answers a PDF posted
+            # there with 204 No Content, which became an error marker
+            return filename.endswith(".xml") or filename.endswith(".XML")
+        return filename.endswith(".pdf") or filename.endswith(".PDF")
 
     def _looks_like_archive(self, path: str) -> bool:
         """Return True if the path/URI name has a known archive extension."""
@@ -2258,6 +2257,13 @@ def main() -> None:
 
     if not inputs:
         logger.error("No input provided (use --input and/or --input-list)")
+        sys.exit(1)
+
+    # A mistyped --input used to log a warning and exit 0, which a script
+    # cannot tell from a run that had nothing left to do
+    if (input_path is not None and not input_path.startswith("s3://")
+            and not glob.has_magic(input_path) and not os.path.exists(os.path.expanduser(input_path))):
+        logger.error(f"Input path does not exist: {input_path}")
         sys.exit(1)
 
     start_time = time.time()
