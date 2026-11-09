@@ -551,17 +551,13 @@ class TEI2LossyJSONConverter:
                 citation_data['urls'] = links
 
     def _validate_citation_content(self, citation_data: dict[str, Any]) -> bool:
-        """Validate that the citation contains meaningful information."""
-        # Check for essential bibliographic elements
-        essential_elements = ['title', 'authors', 'journal', 'doi', 'isbn', 'issn', 'pmc', 'pmid']
+        """Validate that the citation carries any information beyond its id.
 
-        # Check if any essential element is present
-        has_essential = any(citation_data.get(element) for element in essential_elements)
-
-        # Check for fallback elements
-        has_fallback = any(citation_data.get(element) for element in ['raw_reference', 'reference_text'])
-
-        return has_essential or has_fallback
+        A shortlist of "essential" fields used to decide this, which dropped
+        entries GROBID describes with an arXiv id, a URL, editors or a date
+        only, and left the in-text references pointing at them dangling.
+        """
+        return any(value for key, value in citation_data.items() if key not in ('id', 'target'))
 
     def _extract_person_data(self, person_element: Tag) -> dict[str, Any] | None:
         """
