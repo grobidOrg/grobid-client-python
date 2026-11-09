@@ -157,8 +157,17 @@ class JSONReferenceValidator:
         """Validate references in abstract section."""
         abstract = (data.get('biblio') or {}).get('abstract') or []
 
-        for i, paragraph in enumerate(abstract):
-            if 'text' not in paragraph or 'refs' not in paragraph:
+        # At sentence level the abstract is a list of paragraphs, each a list
+        # of sentences; at paragraph level it is a flat list of paragraphs
+        passages = []
+        for i, item in enumerate(abstract):
+            if isinstance(item, list):
+                passages.extend((f"biblio.abstract[{i}][{k}]", sentence) for k, sentence in enumerate(item))
+            else:
+                passages.append((f"biblio.abstract[{i}]", item))
+
+        for location, paragraph in passages:
+            if not isinstance(paragraph, dict) or 'text' not in paragraph or 'refs' not in paragraph:
                 continue
 
             text = paragraph['text']
@@ -166,7 +175,7 @@ class JSONReferenceValidator:
             file_result['total_refs'] += len(refs)
 
             for j, ref in enumerate(refs):
-                is_valid, error = self._validate_single_ref(text, ref, f"biblio.abstract[{i}].refs[{j}]")
+                is_valid, error = self._validate_single_ref(text, ref, f"{location}.refs[{j}]")
                 if is_valid:
                     file_result['valid_refs'] += 1
                 else:

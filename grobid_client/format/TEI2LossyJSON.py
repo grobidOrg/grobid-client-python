@@ -144,7 +144,9 @@ class TEI2LossyJSONConverter:
                                 [
                                     {
                                         "id": sentence.get("xml:id") if sentence.has_attr("xml:id") else id,
-                                        "text": sentence.text,
+                                        # the same whitespace normalisation the
+                                        # ref offsets are computed against
+                                        "text": _normalise_passage_text(sentence.get_text()),
                                         "coords": [
                                             box_to_dict(coord.split(","))
                                             for coord in sentence['coords'].split(";")
@@ -159,7 +161,7 @@ class TEI2LossyJSONConverter:
                             biblio_structure["abstract"] = [
                                 {
                                     "id": id,
-                                    "text": paragraph.text,
+                                    "text": _normalise_passage_text(paragraph.get_text()),
                                     "coords": [
                                         box_to_dict(coord.split(","))
                                         for coord in paragraph['coords'].split(";")
@@ -1010,17 +1012,21 @@ def get_refs_with_offsets(element):
     return final_refs
 
 
+def _normalise_passage_text(text: str) -> str:
+    """Collapse whitespace runs and strip: the text that ref offsets index into.
+
+    get_refs_with_offsets maps its offsets onto exactly this normalisation, so
+    every passage carrying refs must have its text built with it.
+    """
+    if not text:
+        return ""
+    # DO NOT call html.unescape(text) here, to maintain parity and prevent offset corruption.
+    return re.sub(r'\s+', ' ', text.strip())
+
+
 def get_formatted_passage(head_paragraph: str | None, head_section: str | None, paragraph_id: str, element: Tag) -> dict[str, Any]:
     """Format a passage (paragraph or sentence) with metadata and references."""
-    # Import the clean_text method
-    def _clean_text_local(text: str) -> str:
-        if not text:
-            return ""
-        text = re.sub(r'\s+', ' ', text.strip())
-        # DO NOT call html.unescape(text) here either, to maintain parity and prevent offset corruption.
-        return text
-
-    text = _clean_text_local(element.get_text())
+    text = _normalise_passage_text(element.get_text())
     refs = get_refs_with_offsets(element)
 
     passage = {
