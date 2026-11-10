@@ -122,3 +122,33 @@ def test_cli_suggests_the_option_on_missing_credentials(monkeypatch, tmp_path):
         gc_module.main()
     assert exit_info.value.code == 1
     assert any("--no-sign-request" in message for message in logged)
+
+
+def test_a_single_zip_without_credentials_stops_the_run(no_credentials, tmp_path):
+    # It used to be logged as "Could not open archive", followed by "No
+    # eligible files found", and the command exited 0 without the hint.
+    client = _client()
+    from botocore.exceptions import NoCredentialsError
+    with pytest.raises(NoCredentialsError):
+        client.process_paths("processFulltextDocument", [f"s3://{BUCKET}/corpus/zipfiles/0000.zip"],
+                             output=str(tmp_path / "out"))
+
+
+def test_cli_on_a_single_zip_without_credentials(no_credentials, monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr("sys.argv", ["grobid_client", "--input", f"s3://{BUCKET}/corpus/zipfiles/0000.zip",
+                                     "--output", str(tmp_path / "out"), "processFulltextDocument"])
+    with patch.object(GrobidClient, "_test_server_connection", return_value=(True, 200)):
+        with pytest.raises(SystemExit) as exit_info:
+            gc_module.main()
+    assert exit_info.value.code == 1
+    assert "--no-sign-request" in capsys.readouterr().err
+
+
+def test_other_archive_errors_are_still_logged_and_skipped(tmp_path):
+    client = _client()
+    broken = tmp_path / "broken.zip"
+    broken.write_bytes(b"not a zip")
+    assert client._process_archive_core(
+        "processFulltextDocument", str(broken), str(tmp_path / "out"), 1, False, False, False,
+        False, False, False, False, False, False, None, False, False) == (0, 0, 0, 0)
+    assert "Could not open archive" in client.logger.error.call_args[0][0]
