@@ -241,6 +241,19 @@ class GrobidClient(ApiClient):
         self.logger.warning(f"Server busy (503), retrying {file_path} after {self.config['sleep_time']} seconds")
         return not self._stopping.wait(self.config["sleep_time"])
 
+    EMPTY_ANSWER = "The server answered 200 with an empty body"
+
+    def _checked_answer(self, name: str, status: int, text: Optional[str]) -> Tuple[str, int, Optional[str]]:
+        """Turn a 200 without content into an error.
+
+        Written out as is, it became an empty TEI file, which every later run
+        took for a finished document: the document was never retried.
+        """
+        if status == 200 and not (text or "").strip():
+            self.logger.error(f"Empty answer from the server for {name}")
+            return (name, 500, self.EMPTY_ANSWER)
+        return (name, status, text)
+
     def _stop_workers(self, futures: list) -> None:
         """Called when a batch is interrupted: drop queued work, end busy-server retries."""
         self._stopping.set()
@@ -2068,7 +2081,7 @@ class GrobidClient(ApiClient):
                     pdf_handle.close()
 
             if status != 503:
-                return (name, status, res.text)
+                return self._checked_answer(name, status, res.text)
             if not self._wait_for_busy_server(name):
                 return (name, 503, self.BUSY_SERVER_INTERRUPTED)
 
@@ -2228,7 +2241,7 @@ class GrobidClient(ApiClient):
                 return self._handle_unexpected_error(txt_file, e)
 
             if status != 503:
-                return (txt_file, status, res.text)
+                return self._checked_answer(txt_file, status, res.text)
             if not self._wait_for_busy_server(txt_file):
                 return (txt_file, 503, self.BUSY_SERVER_INTERRUPTED)
 
