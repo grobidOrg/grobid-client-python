@@ -160,3 +160,20 @@ def test_without_output_results_sit_next_to_the_inputs(server, pdf_tree, tmp_pat
     assert result.returncode == 0, result.stderr
     assert (pdf_tree / 'a' / 'x.grobid.tei.xml').exists()
     assert (pdf_tree / 'a' / 'deep' / 'y.grobid.tei.xml').exists()
+
+
+def test_progress_lines_come_before_the_errors_in_a_log_file(server, pdf_tree, tmp_path):
+    # stdout and stderr into one file, as with `grobid_client ... > run.log 2>&1`:
+    # "Found N file(s)" used to sit in stdout's buffer and land at the very end
+    log = tmp_path / 'run.log'
+    with open(log, 'w') as fh:
+        subprocess.run(
+            [sys.executable, '-c', 'from grobid_client.grobid_client import main; main()',
+             '--server', server, '--input', str(pdf_tree), '--output', str(tmp_path / 'out'),
+             'processFulltextDocument'],
+            stdout=fh, stderr=subprocess.STDOUT, cwd=tmp_path, timeout=120)
+    lines = log.read_text().splitlines()
+    found = next(i for i, line in enumerate(lines) if line.startswith('Found 5 local file(s)'))
+    error = next(i for i, line in enumerate(lines) if 'broken.pdf failed' in line)
+    summary = next(i for i, line in enumerate(lines) if line.startswith('Processing completed: 4 out of 5'))
+    assert found < error < summary

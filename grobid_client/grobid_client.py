@@ -801,7 +801,7 @@ class GrobidClient(ApiClient):
 
         # Local files gathered from directories and/or loose glob matches
         if fs_files:
-            print(f"Found {len(fs_files)} local file(s) to process")
+            print(f"Found {len(fs_files)} local file(s) to process", flush=True)
             for base_dir, group_files in fs_groups:
                 bp, be, bs = self._run_file_batches(
                     service, group_files, base_dir, output, n,
@@ -1024,15 +1024,15 @@ class GrobidClient(ApiClient):
         docs_per_second = processed / runtime if runtime > 0 else 0
         seconds_per_doc = runtime / processed if processed > 0 else 0
 
-        print(f"Processing completed: {processed} out of {total} files processed")
-        print(f"Errors: {errors} out of {total} files processed")
+        print(f"Processing completed: {processed} out of {total} files processed", flush=True)
+        print(f"Errors: {errors} out of {total} files processed", flush=True)
         if skipped > 0:
             reason = "already existed or previously failed" if skip_errors else "already existed"
-            print(f"Skipped: {skipped} out of {total} files ({reason}, use --force to reprocess)")
+            print(f"Skipped: {skipped} out of {total} files ({reason}, use --force to reprocess)", flush=True)
 
-        print(f"⏱️  Total runtime: {runtime:.2f} seconds")
-        print(f"🚀 Speed: {docs_per_second:.2f} documents/second")
-        print(f" Throughput: {seconds_per_doc:.2f} seconds/document")
+        print(f"⏱️  Total runtime: {runtime:.2f} seconds", flush=True)
+        print(f"🚀 Speed: {docs_per_second:.2f} documents/second", flush=True)
+        print(f" Throughput: {seconds_per_doc:.2f} seconds/document", flush=True)
 
     def _run_file_batches(
             self,
@@ -1407,7 +1407,7 @@ class GrobidClient(ApiClient):
                 self.logger.warning(f"No eligible files found in archive {archive_path}")
                 return 0, 0, 0, 0
 
-            print(f"Found {total_files} file(s) to process in {archive_path}")
+            print(f"Found {total_files} file(s) to process in {archive_path}", flush=True)
 
             # Citation lists go through process_txt, which reads from a path, so
             # they still take the extract-to-a-temp-dir route. Everything else is
@@ -1564,7 +1564,7 @@ class GrobidClient(ApiClient):
             output = "."
 
         queue_size = self._effective_queue_size(n)
-        print(f"Found {total} remote file(s) to process")
+        print(f"Found {total} remote file(s) to process", flush=True)
         # Objects are named relative to their common prefix so that the
         # output mirrors the listed "directory", as it does for local ones
         prefix = self._s3_common_prefix(uris)
@@ -2510,7 +2510,7 @@ def main() -> None:
         sys.exit(1)
 
     runtime = round(time.time() - start_time, 3)
-    print(f"Processing completed in {runtime} seconds")
+    print(f"Processing completed in {runtime} seconds", flush=True)
 
 
 if __name__ == "__main__":
