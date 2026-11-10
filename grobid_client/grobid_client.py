@@ -2085,7 +2085,11 @@ class GrobidClient(ApiClient):
         return items
 
     def get_server_url(self, service: str) -> str:
-        return self.config['grobid_server'] + "/api/" + service
+        # "https://host/" names the same server as "https://host",
+        # but host//api/isalive is a different path: some servers (a Hugging
+        # Face Space among them) answer it with 400, and the client then
+        # reported a server that is up as unavailable
+        return str(self.config['grobid_server']).rstrip('/') + "/api/" + service
 
     def process_txt(
             self,
