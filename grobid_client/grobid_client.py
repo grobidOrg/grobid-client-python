@@ -1316,6 +1316,11 @@ class GrobidClient(ApiClient):
         try:
             kind, archive, member_names = self._open_archive(archive_path)
         except Exception as e:
+            # Without credentials no s3:// archive of the run can be read:
+            # stop, so that the caller can say so (and suggest
+            # --no-sign-request) rather than report nothing to process
+            if _is_missing_credentials(e):
+                raise
             self.logger.error(f"Could not open archive {archive_path}: {str(e)}")
             return 0, 0, 0, 0
 
@@ -2147,6 +2152,12 @@ class GrobidClient(ApiClient):
                 return (txt_file, 503, self.BUSY_SERVER_INTERRUPTED)
 
 
+def _is_missing_credentials(error: BaseException) -> bool:
+    """Tell botocore's "no AWS credentials" errors apart, without importing botocore."""
+    return any(cls.__name__ in ("NoCredentialsError", "PartialCredentialsError")
+               for cls in type(error).__mro__)
+
+
 def main() -> None:
     # Basic logging setup for initialization only
     # The actual logging configuration will be done by GrobidClient based on config.json
@@ -2400,7 +2411,7 @@ def main() -> None:
         sys.exit(130)
     except Exception as e:
         logger.error(f"Processing failed: {str(e)}")
-        if type(e).__name__ == "NoCredentialsError" and not args.no_sign_request:
+        if _is_missing_credentials(e) and not args.no_sign_request:
             logger.error("To read a public s3:// bucket without AWS credentials, add --no-sign-request")
         sys.exit(1)
 
