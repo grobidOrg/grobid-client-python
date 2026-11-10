@@ -145,6 +145,9 @@ class GrobidClient(ApiClient):
         # Set when a run is being interrupted: the worker threads waiting to
         # re-post a document to a busy server give up instead of retrying
         self._stopping = threading.Event()
+        # Output file -> the input writing it in the current run (see
+        # _claim_output_file)
+        self._output_claims: dict = {}
 
         # Initialize config with defaults
         self.config = copy.deepcopy(self.DEFAULT_CONFIG)
@@ -506,6 +509,46 @@ class GrobidClient(ApiClient):
 
         return str(filename)
 
+    def _claim_output_file(self, filename: str, source: str, suffix: str) -> str:
+        """Give an output file to one input of the run, and another name to the next.
+
+        Two inputs of one run can map to the same output: paper.pdf and
+        paper.PDF in one directory, two directories or two archives listed
+        together that both hold paper.pdf. The second one used to overwrite
+        the first, or to be skipped as already done. The first input of the
+        run keeps the name; a later one gets ``suffix`` (its extension, or
+        the archive it comes from) added to the stem, e.g.
+        paper.PDF.grobid.tei.xml or doc.batch1.grobid.tei.xml, and -2, -3...
+        when that is taken too. Inputs are met in the same order on every
+        run, so a rerun finds the same names again.
+        """
+        claims = self._output_claims
+        owner = claims.setdefault(os.path.abspath(filename), source)
+        if owner == source:
+            return filename
+        stem = self._output_stem(filename)
+        candidate = f"{stem}.{suffix or 'dup'}{self.TEI_SUFFIX}"
+        k = 2
+        while claims.get(os.path.abspath(candidate), source) != source:
+            candidate = f"{stem}.{suffix or 'dup'}-{k}{self.TEI_SUFFIX}"
+            k += 1
+        if os.path.abspath(candidate) not in claims:
+            claims[os.path.abspath(candidate)] = source
+            self.logger.warning(
+                f"{source} and {owner} would both be written to {filename}; "
+                f"writing {source} to {candidate}")
+        return candidate
+
+    @staticmethod
+    def _input_source(input_file: Any, input_name: str, sources: Optional[dict]) -> Tuple[str, str]:
+        """Who an input is, for _claim_output_file: (identity, suffix for its stem)."""
+        if sources and input_name in sources:
+            return sources[input_name]
+        suffix = os.path.splitext(input_name)[1].lstrip(".")
+        if isinstance(input_file, str):
+            return os.path.abspath(input_name), suffix
+        return input_name, suffix
+
     def _write_atomic(self, filename: str, text: str) -> None:
         """Write text to filename via a temp file in the same directory, then os.replace.
 
@@ -670,6 +713,7 @@ class GrobidClient(ApiClient):
         of paths). Results from all inputs are aggregated into one summary.
         """
         start_time = time.time()
+        self._output_claims = {}
 
         # Expanded once here: every path derived from it below (the exists
         # check, the error markers, the JSON/Markdown siblings) must agree
@@ -1230,6 +1274,7 @@ class GrobidClient(ApiClient):
         ``output`` (``nested/y.pdf`` -> ``<output>/nested/y.grobid.tei.xml``).
         """
         start_time = time.time()
+        self._output_claims = {}
         if output is not None:
             output = os.path.expanduser(output)
         self._warn_on_consolidation_timeout(consolidate_citations)
@@ -1254,7 +1299,8 @@ class GrobidClient(ApiClient):
         )
 
     def _archive_member_is_done(self, member_name: str, output: str, force: bool, skip_errors: bool,
-                                json_output: bool, markdown_output: bool) -> bool:
+                                json_output: bool, markdown_output: bool,
+                                source: Optional[Tuple[str, str]] = None) -> bool:
         """Tell, before reading it, whether an archive entry would be skipped.
 
         process_batch makes the same decision, but only once it holds the
@@ -1263,12 +1309,16 @@ class GrobidClient(ApiClient):
         there but whose requested JSON or Markdown is missing is not done:
         process_batch regenerates those from the TEI.
         """
-        if force:
-            return False
         name = self._safe_member_path("", member_name)
         if name is None:
             return False  # _read_archive_member reports it
         filename = self._output_file_name(name, ".", output)
+        if source is not None:
+            # Claimed even when done or forced: an entry finished by an
+            # earlier run still owns its name in this one
+            filename = self._claim_output_file(filename, *source)
+        if force:
+            return False
         if os.path.isfile(filename):
             if json_output and not os.path.isfile(filename.replace(self.TEI_SUFFIX, '.json')):
                 return False
@@ -1346,12 +1396,20 @@ class GrobidClient(ApiClient):
             # read straight from the archive into memory and posted from there.
             use_disk = service == 'processCitationList'
 
+            # Entries are told apart from same-named ones of another input of
+            # the run by the archive they come from
+            archive_label = self._archive_stem(os.path.basename(archive_path))
+
+            def member_source(member: str) -> Tuple[str, str]:
+                return f"{archive_path}::{member}", archive_label
+
             # Entries a previous run finished are skipped up front, so that a
             # resumed run does not read (for s3, download) them again
             pending_members = [
                 name for name in eligible_members
                 if not self._archive_member_is_done(name, output, force, skip_errors,
-                                                    json_output, markdown_output)
+                                                    json_output, markdown_output,
+                                                    source=member_source(name))
             ]
             skipped_files_count += total_files - len(pending_members)
             if skipped_files_count:
@@ -1364,12 +1422,14 @@ class GrobidClient(ApiClient):
 
                 if not use_disk:
                     documents = []
+                    sources = {}
                     for member_name in chunk:
                         if verbose:
                             self.logger.info(f"Reading {member_name} from {archive_path}")
                         document = self._read_archive_member(kind, archive, member_name)
                         if document is not None:
                             documents.append(document)
+                            sources[document.name] = member_source(member_name)
 
                     if not documents:
                         continue
@@ -1392,7 +1452,8 @@ class GrobidClient(ApiClient):
                         flavor,
                         json_output,
                         markdown_output,
-                        skip_errors=skip_errors
+                        skip_errors=skip_errors,
+                        sources=sources
                     )
                     processed_files_count += batch_processed
                     errors_files_count += batch_errors
@@ -1402,12 +1463,14 @@ class GrobidClient(ApiClient):
                 temp_dir = tempfile.mkdtemp(prefix="grobid_archive_")
                 try:
                     extracted_files = []
+                    extracted_sources = {}
                     for member_name in chunk:
                         if verbose:
                             self.logger.info(f"Extracting {member_name} from {archive_path}")
                         extracted = self._extract_archive_member(kind, archive, member_name, temp_dir)
                         if extracted is not None:
                             extracted_files.append(extracted)
+                            extracted_sources[extracted] = member_source(member_name)
 
                     if not extracted_files:
                         continue
@@ -1430,7 +1493,8 @@ class GrobidClient(ApiClient):
                         flavor,
                         json_output,
                         markdown_output,
-                        skip_errors=skip_errors
+                        skip_errors=skip_errors,
+                        sources=extracted_sources
                     )
                     processed_files_count += batch_processed
                     errors_files_count += batch_errors
@@ -1607,8 +1671,15 @@ class GrobidClient(ApiClient):
             flavor: Optional[str] = None,
             json_output: bool = False,
             markdown_output: bool = False,
-            skip_errors: bool = False
+            skip_errors: bool = False,
+            sources: Optional[dict] = None
     ) -> Tuple[int, int, int]:
+        """Process one batch of inputs, writing a TEI (or an error marker) for each.
+
+        ``sources`` optionally maps an input's name to ``(identity, suffix)``,
+        for inputs whose name does not tell where they come from (archive
+        entries): see _claim_output_file.
+        """
         batch_start_time = time.time()
         if verbose:
             self.logger.info(f"{len(input_files)} files to process in current batch")
@@ -1622,6 +1693,8 @@ class GrobidClient(ApiClient):
         self._stopping.clear()
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, n)) as executor:
             results = []
+            # Output file of every input sent, by the name process_pdf returns
+            planned = {}
             try:
                 for input_file in input_files:
                     # An entry is either a path or an in-memory document (a named
@@ -1630,7 +1703,9 @@ class GrobidClient(ApiClient):
                     # the results below land on the same output file.
                     input_name = input_file if isinstance(input_file, str) else self._document_name(input_file)
                     # check if TEI file is already produced
-                    filename = self._output_file_name(input_name, input_path, output)
+                    filename = self._claim_output_file(
+                        self._output_file_name(input_name, input_path, output),
+                        *self._input_source(input_file, input_name, sources))
                     if not force and os.path.isfile(filename):
                         self.logger.info(
                             f"{filename} already exists, skipping... (use --force to reprocess pdf input files)")
@@ -1714,10 +1789,11 @@ class GrobidClient(ApiClient):
                         -1)
 
                     results.append(r)
+                    planned[input_name] = filename
 
                 for r in concurrent.futures.as_completed(results):
                     input_file, status, text = r.result()
-                    filename = self._output_file_name(input_file, input_path, output)
+                    filename = planned.get(input_file) or self._output_file_name(input_file, input_path, output)
 
                     if status != 200 or text is None:
                         self.logger.error(f"Processing of {input_file} failed with error {status}: {text}")
