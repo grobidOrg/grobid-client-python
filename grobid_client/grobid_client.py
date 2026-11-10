@@ -647,9 +647,14 @@ class GrobidClient(ApiClient):
     def ping(self) -> Tuple[bool, int]:
         """
         Check the Grobid service. Returns True if the service is up.
-        In addition, returns also the status code.
+        In addition, returns also the status code, which is 0 when the
+        server could not be reached at all (connection refused, DNS, timeout):
+        a server that is down is an answer to a ping, not an exception.
         """
-        return self._test_server_connection()
+        try:
+            return self._test_server_connection()
+        except ServerUnavailableException:
+            return False, 0
 
     def process(
             self,

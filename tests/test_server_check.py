@@ -51,3 +51,16 @@ def test_cli_exits_on_a_misconfigured_server(tmp_path):
                     main()
     assert exc.value.code == 1
     pp.assert_not_called()
+
+
+def test_ping_reports_an_unreachable_server_instead_of_raising():
+    client = GrobidClient(check_server=False, grobid_server='http://127.0.0.1:9')
+    with patch('grobid_client.grobid_client.requests.get',
+               side_effect=requests.exceptions.ConnectionError('refused')):
+        assert client.ping() == (False, 0)
+
+
+def test_ping_reports_a_bad_status():
+    client = GrobidClient(check_server=False)
+    with _get(503):
+        assert client.ping() == (False, 503)
