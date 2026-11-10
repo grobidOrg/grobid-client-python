@@ -34,6 +34,7 @@ import logging
 import shutil
 import tarfile
 import tempfile
+import threading
 import zipfile
 from typing import Any, BinaryIO, Callable, List, Optional, Tuple, Union
 import copy
@@ -141,6 +142,9 @@ class GrobidClient(ApiClient):
         # --no-sign-request) instead of with the default credential chain
         self.s3_no_sign_request = s3_no_sign_request
         self._s3_client_instance: Any = None
+        # Set when a run is being interrupted: the worker threads waiting to
+        # re-post a document to a busy server give up instead of retrying
+        self._stopping = threading.Event()
 
         # Initialize config with defaults
         self.config = copy.deepcopy(self.DEFAULT_CONFIG)
@@ -220,10 +224,25 @@ class GrobidClient(ApiClient):
                 f"(2-3 minutes is recommended)."
             )
 
-    def _wait_for_busy_server(self, file_path: str) -> None:
-        """Pause before re-posting a document the server answered 503 to."""
+    BUSY_SERVER_INTERRUPTED = "Interrupted while waiting for the busy server"
+
+    def _wait_for_busy_server(self, file_path: str) -> bool:
+        """Pause before re-posting a document the server answered 503 to.
+
+        Returns False, at once, when the run is being interrupted: a server
+        that stays busy would otherwise keep the worker threads retrying, and
+        the process alive, long after Ctrl-C.
+        """
+        if self._stopping.is_set():
+            return False
         self.logger.warning(f"Server busy (503), retrying {file_path} after {self.config['sleep_time']} seconds")
-        time.sleep(self.config["sleep_time"])
+        return not self._stopping.wait(self.config["sleep_time"])
+
+    def _stop_workers(self, futures: list) -> None:
+        """Called when a batch is interrupted: drop queued work, end busy-server retries."""
+        self._stopping.set()
+        for future in futures:
+            future.cancel()
 
     def _handle_request_error(
             self, file_path: str, error: Exception, error_type: str = "Request"
@@ -1595,172 +1614,180 @@ class GrobidClient(ApiClient):
 
         # we use ThreadPoolExecutor and not ProcessPoolExecutor because it is an I/O intensive process
         # A pool of one is still a pool: n < 1 would make ThreadPoolExecutor raise
+        self._stopping.clear()
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, n)) as executor:
             results = []
-            for input_file in input_files:
-                # An entry is either a path or an in-memory document (a named
-                # stream, as fed by the archive/s3 streaming). Either way it goes
-                # by its name here, and process_pdf returns that same name, so
-                # the results below land on the same output file.
-                input_name = input_file if isinstance(input_file, str) else self._document_name(input_file)
-                # check if TEI file is already produced
-                filename = self._output_file_name(input_name, input_path, output)
-                if not force and os.path.isfile(filename):
-                    self.logger.info(
-                        f"{filename} already exists, skipping... (use --force to reprocess pdf input files)")
-                    skipped_count += 1
-
-                    # Check if JSON output is needed but JSON file doesn't exist
-                    if json_output:
-                        json_filename = filename.replace('.grobid.tei.xml', '.json')
-                        # Expand ~ to home directory before checking file existence
-                        json_filename_expanded = os.path.expanduser(json_filename)
-                        if not os.path.isfile(json_filename_expanded):
-                            self.logger.info(f"JSON file {json_filename} does not exist, generating JSON from existing TEI...")
-                            try:
-                                converter: Any = TEI2LossyJSONConverter()
-                                json_data = converter.convert_tei_file(filename, stream=False)
-
-                                if json_data:
-                                    self._write_atomic(
-                                        json_filename_expanded,
-                                        json.dumps(json_data, indent=2, ensure_ascii=False))
-                                    self.logger.debug(f"Successfully created JSON file: {json_filename_expanded}")
-                                else:
-                                    self.logger.warning(f"Failed to convert TEI to JSON for {filename}")
-                            except Exception as e:
-                                self.logger.error(f"Failed to convert TEI to JSON for {filename}: {str(e)}")
-
-                    # Check if Markdown output is needed but Markdown file doesn't exist
-                    if markdown_output:
-                        markdown_filename = filename.replace('.grobid.tei.xml', '.md')
-                        # Expand ~ to home directory before checking file existence
-                        markdown_filename_expanded = os.path.expanduser(markdown_filename)
-                        if not os.path.isfile(markdown_filename_expanded):
-                            self.logger.info(f"Markdown file {markdown_filename} does not exist, generating Markdown from existing TEI...")
-                            try:
-                                from .format.TEI2Markdown import TEI2MarkdownConverter
-                                converter = TEI2MarkdownConverter()
-                                markdown_data = converter.convert_tei_file(filename)
-
-                                if markdown_data:
-                                    self._write_atomic(markdown_filename_expanded, markdown_data)
-                                    self.logger.debug(f"Successfully created Markdown file: {markdown_filename_expanded}")
-                                else:
-                                    self.logger.warning(f"Failed to convert TEI to Markdown for {filename}")
-                            except Exception as e:
-                                self.logger.error(f"Failed to convert TEI to Markdown for {filename}: {str(e)}")
-
-                    continue
-
-                # Documents that already failed are usually going to fail again
-                # as long as nothing changed, so --skip-errors lets a re-run go
-                # straight past them. See issue #119.
-                if not force and skip_errors:
-                    previous_errors = self._find_error_files(filename)
-                    if previous_errors:
+            try:
+                for input_file in input_files:
+                    # An entry is either a path or an in-memory document (a named
+                    # stream, as fed by the archive/s3 streaming). Either way it goes
+                    # by its name here, and process_pdf returns that same name, so
+                    # the results below land on the same output file.
+                    input_name = input_file if isinstance(input_file, str) else self._document_name(input_file)
+                    # check if TEI file is already produced
+                    filename = self._output_file_name(input_name, input_path, output)
+                    if not force and os.path.isfile(filename):
                         self.logger.info(
-                            f"{input_name} previously failed ({os.path.basename(previous_errors[0])}), "
-                            f"skipping... (use --force to retry it)")
+                            f"{filename} already exists, skipping... (use --force to reprocess pdf input files)")
                         skipped_count += 1
+
+                        # Check if JSON output is needed but JSON file doesn't exist
+                        if json_output:
+                            json_filename = filename.replace('.grobid.tei.xml', '.json')
+                            # Expand ~ to home directory before checking file existence
+                            json_filename_expanded = os.path.expanduser(json_filename)
+                            if not os.path.isfile(json_filename_expanded):
+                                self.logger.info(f"JSON file {json_filename} does not exist, generating JSON from existing TEI...")
+                                try:
+                                    converter: Any = TEI2LossyJSONConverter()
+                                    json_data = converter.convert_tei_file(filename, stream=False)
+
+                                    if json_data:
+                                        self._write_atomic(
+                                            json_filename_expanded,
+                                            json.dumps(json_data, indent=2, ensure_ascii=False))
+                                        self.logger.debug(f"Successfully created JSON file: {json_filename_expanded}")
+                                    else:
+                                        self.logger.warning(f"Failed to convert TEI to JSON for {filename}")
+                                except Exception as e:
+                                    self.logger.error(f"Failed to convert TEI to JSON for {filename}: {str(e)}")
+
+                        # Check if Markdown output is needed but Markdown file doesn't exist
+                        if markdown_output:
+                            markdown_filename = filename.replace('.grobid.tei.xml', '.md')
+                            # Expand ~ to home directory before checking file existence
+                            markdown_filename_expanded = os.path.expanduser(markdown_filename)
+                            if not os.path.isfile(markdown_filename_expanded):
+                                self.logger.info(f"Markdown file {markdown_filename} does not exist, generating Markdown from existing TEI...")
+                                try:
+                                    from .format.TEI2Markdown import TEI2MarkdownConverter
+                                    converter = TEI2MarkdownConverter()
+                                    markdown_data = converter.convert_tei_file(filename)
+
+                                    if markdown_data:
+                                        self._write_atomic(markdown_filename_expanded, markdown_data)
+                                        self.logger.debug(f"Successfully created Markdown file: {markdown_filename_expanded}")
+                                    else:
+                                        self.logger.warning(f"Failed to convert TEI to Markdown for {filename}")
+                                except Exception as e:
+                                    self.logger.error(f"Failed to convert TEI to Markdown for {filename}: {str(e)}")
+
                         continue
 
-                selected_process: Any = self.process_pdf
-                if service == 'processCitationList':
-                    selected_process = self.process_txt
+                    # Documents that already failed are usually going to fail again
+                    # as long as nothing changed, so --skip-errors lets a re-run go
+                    # straight past them. See issue #119.
+                    if not force and skip_errors:
+                        previous_errors = self._find_error_files(filename)
+                        if previous_errors:
+                            self.logger.info(
+                                f"{input_name} previously failed ({os.path.basename(previous_errors[0])}), "
+                                f"skipping... (use --force to retry it)")
+                            skipped_count += 1
+                            continue
 
-                if verbose:
-                    self.logger.info(f"Adding {input_name} to the queue")
+                    selected_process: Any = self.process_pdf
+                    if service == 'processCitationList':
+                        selected_process = self.process_txt
 
-                r = executor.submit(
-                    selected_process,
-                    service,
-                    input_file,
-                    generate_ids,
-                    consolidate_header,
-                    consolidate_citations,
-                    include_raw_citations,
-                    include_raw_affiliations,
-                    tei_coordinates,
-                    segment_sentences,
-                    flavor,
-                    -1,
-                    -1)
+                    if verbose:
+                        self.logger.info(f"Adding {input_name} to the queue")
 
-                results.append(r)
+                    r = executor.submit(
+                        selected_process,
+                        service,
+                        input_file,
+                        generate_ids,
+                        consolidate_header,
+                        consolidate_citations,
+                        include_raw_citations,
+                        include_raw_affiliations,
+                        tei_coordinates,
+                        segment_sentences,
+                        flavor,
+                        -1,
+                        -1)
 
-            for r in concurrent.futures.as_completed(results):
-                input_file, status, text = r.result()
-                filename = self._output_file_name(input_file, input_path, output)
+                    results.append(r)
 
-                if status != 200 or text is None:
-                    self.logger.error(f"Processing of {input_file} failed with error {status}: {text}")
-                    error_count += 1
-                    # writing error file with suffixed error code
-                    error_filename = self._error_file_name(filename, status)
-                    try:
-                        self._write_atomic(error_filename, text if text is not None else "")
-                        self.logger.info(f"Error details written to {error_filename}")
-                        # A previous run may have failed with a different status code;
-                        # keep only the marker of this run so the error state of the
-                        # document stays unambiguous (and skippable).
-                        self._remove_error_files(filename, keep=error_filename)
-                    except OSError as e:
-                        self.logger.error(f"Failed to write error file {filename}: {str(e)}")
-                else:
-                    # writing TEI file
-                    try:
-                        self._write_atomic(filename, text)
-                        self.logger.debug(f"Successfully wrote TEI file: {filename}")
-                        # Counted once the TEI is on disk: a failed write
-                        # leaves no output and must not be reported as done
-                        processed_count += 1
+                for r in concurrent.futures.as_completed(results):
+                    input_file, status, text = r.result()
+                    filename = self._output_file_name(input_file, input_path, output)
 
-                        # The document no longer is in error: drop the marker left by
-                        # a previous failed run so it is not skipped by --skip-errors.
-                        self._remove_error_files(filename)
-
-
-                        # Convert to JSON if requested
-                        if json_output:
-                            try:
-                                converter = TEI2LossyJSONConverter()
-                                json_data = converter.convert_tei_file(filename, stream=False)
-                                
-                                if json_data:
-                                    json_filename = filename.replace('.grobid.tei.xml', '.json')
-                                    # Always write JSON file when TEI is written (respects --force behavior)
-                                    json_filename_expanded = os.path.expanduser(json_filename)
-                                    self._write_atomic(
-                                        json_filename_expanded,
-                                        json.dumps(json_data, indent=2, ensure_ascii=False))
-                                    self.logger.debug(f"Successfully wrote JSON file: {json_filename_expanded}")
-                                else:
-                                    self.logger.warning(f"Failed to convert TEI to JSON for {filename}")
-                            except Exception as e:
-                                self.logger.error(f"Failed to convert TEI to JSON for {filename}: {str(e)}")
-                        
-                        # Convert to Markdown if requested
-                        if markdown_output:
-                            try:
-                                from .format.TEI2Markdown import TEI2MarkdownConverter
-                                converter = TEI2MarkdownConverter()
-                                markdown_data = converter.convert_tei_file(filename)
-
-                                if markdown_data is not None:
-                                    markdown_filename = filename.replace('.grobid.tei.xml', '.md')
-                                    # Always write Markdown file when TEI is written (respects --force behavior)
-                                    markdown_filename_expanded = os.path.expanduser(markdown_filename)
-                                    self._write_atomic(markdown_filename_expanded, markdown_data)
-                                    self.logger.debug(f"Successfully wrote Markdown file: {markdown_filename_expanded}")
-                                else:
-                                    self.logger.warning(f"Failed to convert TEI to Markdown for {filename}")
-                            except Exception as e:
-                                self.logger.error(f"Failed to convert TEI to Markdown for {filename}: {str(e)}")
-                                
-                    except OSError as e:
-                        self.logger.error(f"Failed to write TEI XML file {filename}: {str(e)}")
+                    if status != 200 or text is None:
+                        self.logger.error(f"Processing of {input_file} failed with error {status}: {text}")
                         error_count += 1
+                        # writing error file with suffixed error code
+                        error_filename = self._error_file_name(filename, status)
+                        try:
+                            self._write_atomic(error_filename, text if text is not None else "")
+                            self.logger.info(f"Error details written to {error_filename}")
+                            # A previous run may have failed with a different status code;
+                            # keep only the marker of this run so the error state of the
+                            # document stays unambiguous (and skippable).
+                            self._remove_error_files(filename, keep=error_filename)
+                        except OSError as e:
+                            self.logger.error(f"Failed to write error file {filename}: {str(e)}")
+                    else:
+                        # writing TEI file
+                        try:
+                            self._write_atomic(filename, text)
+                            self.logger.debug(f"Successfully wrote TEI file: {filename}")
+                            # Counted once the TEI is on disk: a failed write
+                            # leaves no output and must not be reported as done
+                            processed_count += 1
+
+                            # The document no longer is in error: drop the marker left by
+                            # a previous failed run so it is not skipped by --skip-errors.
+                            self._remove_error_files(filename)
+
+
+                            # Convert to JSON if requested
+                            if json_output:
+                                try:
+                                    converter = TEI2LossyJSONConverter()
+                                    json_data = converter.convert_tei_file(filename, stream=False)
+                                
+                                    if json_data:
+                                        json_filename = filename.replace('.grobid.tei.xml', '.json')
+                                        # Always write JSON file when TEI is written (respects --force behavior)
+                                        json_filename_expanded = os.path.expanduser(json_filename)
+                                        self._write_atomic(
+                                            json_filename_expanded,
+                                            json.dumps(json_data, indent=2, ensure_ascii=False))
+                                        self.logger.debug(f"Successfully wrote JSON file: {json_filename_expanded}")
+                                    else:
+                                        self.logger.warning(f"Failed to convert TEI to JSON for {filename}")
+                                except Exception as e:
+                                    self.logger.error(f"Failed to convert TEI to JSON for {filename}: {str(e)}")
+                        
+                            # Convert to Markdown if requested
+                            if markdown_output:
+                                try:
+                                    from .format.TEI2Markdown import TEI2MarkdownConverter
+                                    converter = TEI2MarkdownConverter()
+                                    markdown_data = converter.convert_tei_file(filename)
+
+                                    if markdown_data is not None:
+                                        markdown_filename = filename.replace('.grobid.tei.xml', '.md')
+                                        # Always write Markdown file when TEI is written (respects --force behavior)
+                                        markdown_filename_expanded = os.path.expanduser(markdown_filename)
+                                        self._write_atomic(markdown_filename_expanded, markdown_data)
+                                        self.logger.debug(f"Successfully wrote Markdown file: {markdown_filename_expanded}")
+                                    else:
+                                        self.logger.warning(f"Failed to convert TEI to Markdown for {filename}")
+                                except Exception as e:
+                                    self.logger.error(f"Failed to convert TEI to Markdown for {filename}: {str(e)}")
+                                
+                        except OSError as e:
+                            self.logger.error(f"Failed to write TEI XML file {filename}: {str(e)}")
+                            error_count += 1
+            except BaseException:
+                # Ctrl-C (or any error) while results are awaited: the pool is
+                # about to be joined, so its threads must not keep retrying
+                self._stop_workers(results)
+                raise
+
 
         # Calculate batch statistics
         batch_runtime = time.time() - batch_start_time
@@ -1956,7 +1983,8 @@ class GrobidClient(ApiClient):
 
             if status != 503:
                 return (name, status, res.text)
-            self._wait_for_busy_server(name)
+            if not self._wait_for_busy_server(name):
+                return (name, 503, self.BUSY_SERVER_INTERRUPTED)
 
     def process_documents(
             self,
@@ -2003,27 +2031,33 @@ class GrobidClient(ApiClient):
         self._warn_on_engine_concurrency(max(1, n))
 
         # A pool of one is still a pool: n < 1 would make ThreadPoolExecutor raise
+        self._stopping.clear()
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, n)) as executor:
-            futures = [
-                executor.submit(
-                    self._process_named_pdf,
-                    service,
-                    name,
-                    document,
-                    generate_ids,
-                    consolidate_header,
-                    consolidate_citations,
-                    include_raw_citations,
-                    include_raw_affiliations,
-                    tei_coordinates,
-                    segment_sentences,
-                    flavor
-                )
-                for name, document in items
-            ]
-            # Collected in submission order rather than with as_completed():
-            # in-memory documents have no filenames to be matched back on later.
-            return [future.result() for future in futures]
+            futures: list = []
+            try:
+                for name, document in items:
+                    futures.append(executor.submit(
+                        self._process_named_pdf,
+                        service,
+                        name,
+                        document,
+                        generate_ids,
+                        consolidate_header,
+                        consolidate_citations,
+                        include_raw_citations,
+                        include_raw_affiliations,
+                        tei_coordinates,
+                        segment_sentences,
+                        flavor
+                    ))
+                # Collected in submission order rather than with as_completed():
+                # in-memory documents have no filenames to be matched back on later.
+                return [future.result() for future in futures]
+            except BaseException:
+                # Ctrl-C while results are awaited: the pool is about to be
+                # joined, so its threads must not keep retrying a busy server
+                self._stop_workers(futures)
+                raise
 
     def _name_documents(self, documents: Any) -> list:
         """Pair every document with the name it will be known by.
@@ -2105,7 +2139,8 @@ class GrobidClient(ApiClient):
 
             if status != 503:
                 return (txt_file, status, res.text)
-            self._wait_for_busy_server(txt_file)
+            if not self._wait_for_busy_server(txt_file):
+                return (txt_file, 503, self.BUSY_SERVER_INTERRUPTED)
 
 
 def main() -> None:

@@ -407,8 +407,8 @@ class TestGrobidClient:
         with patch('grobid_client.grobid_client.GrobidClient._test_server_connection'):
             with patch('grobid_client.grobid_client.GrobidClient._configure_logging'):
                 with patch('builtins.open', mock_open()):
-                    with patch('time.sleep') as mock_sleep:
-                        client = GrobidClient(check_server=False)
+                    client = GrobidClient(check_server=False)
+                    with patch.object(client._stopping, 'wait', return_value=False) as mock_sleep:
                         client.logger = Mock()
 
                         result = client.process_pdf(
@@ -423,7 +423,7 @@ class TestGrobidClient:
                             segment_sentences=False
                         )
 
-                        # Should have called sleep due to 503 response
+                        # Should have waited once due to the 503 response
                         mock_sleep.assert_called_once()
                         assert result[1] == 200
 
@@ -1635,7 +1635,7 @@ class TestInMemoryDocuments:
         client = self._client()
         post, sent = self._post_spy(statuses=(503, 200))
 
-        with patch('time.sleep'):
+        with patch.object(client._stopping, 'wait', return_value=False):
             with patch.object(GrobidClient, 'post', side_effect=post):
                 result = client.process_pdf(
                     'processFulltextDocument', self._named(self.PDF, 'busy.pdf'))
@@ -1653,7 +1653,7 @@ class TestInMemoryDocuments:
             with open(path, 'wb') as f:
                 f.write(self.PDF)
 
-            with patch('time.sleep'):
+            with patch.object(client._stopping, 'wait', return_value=False):
                 with patch.object(GrobidClient, 'post', side_effect=post):
                     result = client.process_pdf('processFulltextDocument', path)
 

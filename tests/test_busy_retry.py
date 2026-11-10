@@ -44,7 +44,7 @@ class TestPdfRetry:
         client = _client()
         post, calls = _busy_then_ok(3)
         with patch.object(GrobidClient, 'post', side_effect=post):
-            with patch('grobid_client.grobid_client.time.sleep') as sleep:
+            with patch.object(client._stopping, 'wait', return_value=False) as sleep:
                 name, status, text = client.process_pdf('processFulltextDocument', b'%PDF-bytes')
         assert (status, text) == (200, '<TEI>ok</TEI>')
         assert sleep.call_count == 3
@@ -60,7 +60,7 @@ class TestPdfRetry:
             with open(pdf, 'wb') as fh:
                 fh.write(b'%PDF-disk')
             with patch.object(GrobidClient, 'post', side_effect=post):
-                with patch('grobid_client.grobid_client.time.sleep'):
+                with patch.object(client._stopping, 'wait', return_value=False):
                     _, status, _ = client.process_pdf('processFulltextDocument', pdf)
         assert status == 200
         assert all(h.closed for h in calls)
@@ -69,7 +69,7 @@ class TestPdfRetry:
         client = _client()
         post, calls = _busy_then_ok(5000)
         with patch.object(GrobidClient, 'post', side_effect=post):
-            with patch('grobid_client.grobid_client.time.sleep'):
+            with patch.object(client._stopping, 'wait', return_value=False):
                 _, status, _ = client.process_pdf('processFulltextDocument', b'%PDF')
         assert status == 200
         assert len(calls) == 5001
@@ -85,7 +85,7 @@ class TestPdfRetry:
             return answer
 
         with patch.object(GrobidClient, 'post', side_effect=post):
-            with patch('grobid_client.grobid_client.time.sleep'):
+            with patch.object(client._stopping, 'wait', return_value=False):
                 _, status, text = client.process_pdf('processFulltextDocument', b'%PDF')
         assert status == 408 and 'timeout' in text.lower()
 
@@ -103,7 +103,7 @@ class TestTxtRetry:
         post, calls = _busy_then_ok(2)
         with tempfile.TemporaryDirectory() as d:
             with patch.object(GrobidClient, 'post', side_effect=post):
-                with patch('grobid_client.grobid_client.time.sleep') as sleep:
+                with patch.object(client._stopping, 'wait', return_value=False) as sleep:
                     name, status, text = client.process_txt(
                         'processCitationList', self._refs(d), False, False, False, False, False, False, False)
         assert (status, text) == (200, '<TEI>ok</TEI>')
